@@ -7,8 +7,7 @@ const makeWASocket = baileys.default;
 const useMultiFileAuthState = baileys.useMultiFileAuthState;
 const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
 const fs = require('fs');
-const axios = require('axios');
-const cheerio = require('cheerio');
+const { firefox } = require('playwright');
 const qrcodeTerminal = require("qrcode-terminal");
 const QRCode = require("qrcode");
 const pino = require("pino");
@@ -63,7 +62,7 @@ const NEWS_SCHEDULE = [
 ];
 
 let lastNewsSentKey = null;
-let newsInProgress = false;
+let newsInProgress = false; // Evitar ejecuciones simultáneas
 
 // Limpieza de memoria cada hora
 setInterval(() => {
@@ -95,15 +94,6 @@ const SITIOS = [
 
 const MAX_NOTICIAS_POR_SITIO = 2;
 const MAX_CHARS_RESUMEN = 900;
-
-const HEADERS_AXIOS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Cache-Control': 'no-cache'
-};
 
 // ============================================================
 // SCRAPER — UTILIDADES DE FECHA
@@ -198,21 +188,9 @@ function limpiarTexto(texto) {
 }
 
 // ============================================================
-// SCRAPER — OBTENER HTML CON AXIOS
+// SCRAPER — SCRAPING POR SITIO
 // ============================================================
-async function fetchHTML(url) {
-    const response = await axios.get(url, {
-        headers: HEADERS_AXIOS,
-        timeout: 20000,
-        responseType: 'text'
-    });
-    return response.data;
-}
-
-// ============================================================
-// SCRAPER — SCRAPING POR SITIO (AXIOS + CHEERIO)
-// ============================================================
-async function scrapearSitio(sitio, fechasValidas) {
+async function scrapearSitio(page, sitio, fechasValidas) {
     console.log(`🌐 Scrapeando: ${sitio.nombre}`);
 
     const resultado = {
@@ -224,117 +202,116 @@ async function scrapearSitio(sitio, fechasValidas) {
     };
 
     try {
-        const htmlListado = await fetchHTML(sitio.url);
-        const $ = cheerio.load(htmlListado);
+        await page.goto(sitio.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-        // Extraer enlaces de artículos
-        const enlaces = [];
-        $('a[href]').each((_, el) => {
-            const href = $(el).attr('href') || '';
-            const text = $(el).text().trim();
-            const urlCompleta = href.startsWith('http') ? href : `https://${sitio.dominio}${href}`;
+        try {
+            await page.click('.accept-cookies, .close-popup, .modal-close, .gdrpr-modal-close', { timeout: 2000 });
+        } catch { /* Sin pop-ups */ }
 
-            if (
-                urlCompleta.includes(sitio.dominio) &&
-                urlCompleta.length > 60 &&
-                text.length > 15 &&
-                !urlCompleta.includes('#') &&
-                !urlCompleta.includes('/seccion/') &&
-                !urlCompleta.includes('/categoria/') &&
-                !urlCompleta.includes('/author/') &&
-                !urlCompleta.includes('/tag/') &&
-                !urlCompleta.includes('/local/page/') &&
-                !text.toUpperCase().includes('LEER MÁS') &&
-                !text.toUpperCase().includes('CONTINUAR') &&
-                !text.toUpperCase().includes('VER TODAS')
-            ) {
-                if (!enlaces.includes(urlCompleta)) {
-                    enlaces.push(urlCompleta);
-                }
-            }
-        });
+        await page.waitForTimeout(3000);
+        for (let i = 0; i < 3; i++) {
+            await page.evaluate(() => window.scrollBy(0, 500));
+            await page.waitForTimeout(500);
+        }
 
-        const enlacesFiltrados = enlaces.slice(0, 10);
-        console.log(`   📌 ${enlacesFiltrados.length} enlaces encontrados`);
+        const enlaces = await page.evaluate((dominio) => {
+            const links = Array.from(document.querySelectorAll('a[href]'))
+                .map(a => ({ href: a.href.trim(), text: a.textContent.trim() }))
+                .filter(link =>
+                    link.href.includes(dominio) &&
+                    link.href.length > 60 &&
+                    link.text.length > 15 &&
+                    !link.href.includes('#') &&
+                    !link.href.includes('/seccion/') &&
+                    !link.href.includes('/categoria/') &&
+                    !link.href.includes('/author/') &&
+                    !link.href.includes('/tag/') &&
+                    !link.href.includes('/local/page/') &&
+                    !link.text.toUpperCase().includes('LEER MÁS') &&
+                    !link.text.toUpperCase().includes('CONTINUAR') &&
+                    !link.text.toUpperCase().includes('VER TODAS')
+                );
+            return [...new Map(links.map(l => [l.href, l])).values()].slice(0, 10).map(l => l.href);
+        }, sitio.dominio);
 
-        for (let i = 0; i < enlacesFiltrados.length && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO; i++) {
-            const url = enlacesFiltrados[i];
+        console.log(`   📌 ${enlaces.length} enlaces encontrados`);
+
+        for (let i = 0; i < enlaces.length && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO; i++) {
+            const url = enlaces[i];
 
             try {
-                await new Promise(r => setTimeout(r, 1000 + Math.floor(Math.random() * 500)));
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                await page.waitForTimeout(1500);
 
-                const htmlArticulo = await fetchHTML(url);
-                const $a = cheerio.load(htmlArticulo);
+                const datosNoticia = await page.evaluate(() => {
+                    const titular = document.querySelector('h1')?.textContent.trim() ||
+                        document.querySelector('.entry-title, .post-title, .titulo-noticia')?.textContent.trim() ||
+                        'Sin titular';
 
-                // Titular
-                const titular =
-                    $a('h1').first().text().trim() ||
-                    $a('.entry-title, .post-title, .titulo-noticia').first().text().trim() ||
-                    'Sin titular';
+                    let parrafosTexto = [];
+                    const selectoresArticulo = [
+                        'article .entry-content p', 'article .post-content p',
+                        '.entry-content p', '.post-content p', '.contenido p', 'article p'
+                    ];
 
-                // Párrafos del artículo
-                const parrafosTexto = [];
-                const selectores = [
-                    'article .entry-content p',
-                    'article .post-content p',
-                    '.entry-content p',
-                    '.post-content p',
-                    '.contenido p',
-                    'article p'
-                ];
+                    for (const selector of selectoresArticulo) {
+                        if (parrafosTexto.length >= 2) break;
+                        document.querySelectorAll(selector).forEach(p => {
+                            if (parrafosTexto.length >= 2) return;
+                            const texto = p.textContent.trim();
+                            const esCss = texto.includes('{') || texto.includes('font-') ||
+                                          texto.includes('margin') || texto.includes('color:#') ||
+                                          texto.includes('display:') || texto.includes('!important');
+                            if (
+                                texto.length > 60 && !esCss &&
+                                !texto.includes('©') && !texto.includes('todos los derechos') &&
+                                !texto.includes('Publicidad') && !texto.includes('Suscríbete') &&
+                                !texto.includes('Newsletter') && !texto.includes('compartir')
+                            ) {
+                                parrafosTexto.push(texto);
+                            }
+                        });
+                    }
 
-                for (const selector of selectores) {
-                    if (parrafosTexto.length >= 2) break;
-                    $a(selector).each((_, el) => {
-                        if (parrafosTexto.length >= 2) return;
-                        const texto = $a(el).text().trim();
-                        const esCss = texto.includes('{') || texto.includes('font-') ||
-                                      texto.includes('margin') || texto.includes('color:#') ||
-                                      texto.includes('display:') || texto.includes('!important');
-                        if (
-                            texto.length > 60 && !esCss &&
-                            !texto.includes('©') && !texto.includes('todos los derechos') &&
-                            !texto.includes('Publicidad') && !texto.includes('Suscríbete') &&
-                            !texto.includes('Newsletter') && !texto.includes('compartir')
-                        ) {
-                            parrafosTexto.push(texto);
-                        }
-                    });
-                }
+                    const resumen = parrafosTexto.slice(0, 2).join('\n\n');
 
-                const resumen = parrafosTexto.slice(0, 2).join('\n\n');
+                    const posiblesFechas = [
+                        document.querySelector('time')?.getAttribute('datetime'),
+                        document.querySelector('meta[property="article:published_time"]')?.getAttribute('content'),
+                        document.querySelector('meta[name="date"]')?.getAttribute('content'),
+                        document.querySelector('time')?.textContent.trim(),
+                        document.querySelector('.fecha, .post-date, .published, .entry-date')?.textContent.trim()
+                    ];
+                    const fecha = posiblesFechas.find(f => f && f.trim().length > 3 && !f.includes('{')) || 'Fecha no encontrada';
 
-                // Fecha
-                const posiblesFechas = [
-                    $a('time').first().attr('datetime'),
-                    $a('meta[property="article:published_time"]').attr('content'),
-                    $a('meta[name="date"]').attr('content'),
-                    $a('time').first().text().trim(),
-                    $a('.fecha, .post-date, .published, .entry-date').first().text().trim()
-                ];
-                const fecha = posiblesFechas.find(f => f && f.trim().length > 3 && !f.includes('{')) || 'Fecha no encontrada';
+                    return { titular, resumen, fecha };
+                });
 
-                const titularLimpio = limpiarTexto(titular);
-                const resumenLimpio = cortarEnOracionCompleta(limpiarTexto(resumen), MAX_CHARS_RESUMEN);
+                datosNoticia.titular = limpiarTexto(datosNoticia.titular);
+                datosNoticia.resumen = cortarEnOracionCompleta(limpiarTexto(datosNoticia.resumen), MAX_CHARS_RESUMEN);
 
-                const validacion = esFechaValida(fecha, fechasValidas);
+                const validacion = esFechaValida(datosNoticia.fecha, fechasValidas);
 
                 if (validacion.valida) {
                     resultado.noticias.push({
                         numero: resultado.noticias.length + 1,
                         fechaDetectada: validacion.cual,
-                        fechaLegible: formatearFechaLegible(fecha),
-                        titular: titularLimpio,
-                        resumen: resumenLimpio
+                        fechaLegible: formatearFechaLegible(datosNoticia.fecha),
+                        titular: datosNoticia.titular,
+                        resumen: datosNoticia.resumen
                     });
-                    console.log(`   ✅ ACEPTADA (${validacion.cual}) → "${titularLimpio.slice(0, 55)}"`);
+                    console.log(`   ✅ ACEPTADA (${validacion.cual}) → "${datosNoticia.titular.slice(0, 55)}"`);
                 } else {
-                    console.log(`   ⏭️  DESCARTADA → Fecha: "${fecha}"`);
-                    const fechaParsed = parsearFechaTexto(fecha);
+                    console.log(`   ⏭️  DESCARTADA → Fecha: "${datosNoticia.fecha}"`);
+                    const fechaParsed = parsearFechaTexto(datosNoticia.fecha);
                     if (fechaParsed) {
                         const diffDias = (new Date() - fechaParsed) / (1000 * 60 * 60 * 24);
                         if (diffDias > 3) break;
                     }
+                }
+
+                if (i < enlaces.length - 1 && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO) {
+                    await page.waitForTimeout(1500 + Math.floor(Math.random() * 800));
                 }
 
             } catch (err) {
@@ -365,11 +342,17 @@ async function ejecutarScraper() {
     console.log(`\n📰 Iniciando scraper...`);
     console.log(`📅 HOY: ${fechasValidas.hoy.label} | AYER: ${fechasValidas.ayer.label}`);
 
+    const browser = await firefox.launch({ headless: true });
+    const page    = await browser.newPage();
     const resultados = [];
 
-    for (const sitio of SITIOS) {
-        const resultado = await scrapearSitio(sitio, fechasValidas);
-        resultados.push(resultado);
+    try {
+        for (const sitio of SITIOS) {
+            const resultado = await scrapearSitio(page, sitio, fechasValidas);
+            resultados.push(resultado);
+        }
+    } finally {
+        await browser.close();
     }
 
     return { resultados, fechasValidas };
@@ -384,6 +367,7 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
     let noticiaGlobal = 1;
     let hayNoticias = false;
 
+    // Encabezado
     let encabezado = `📡 *NOTICIAS LOCALES*\n`;
     encabezado    += `📍 León, Guanajuato\n`;
     encabezado    += `📅 ${fechasValidas.hoy.label}\n`;
@@ -421,6 +405,7 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
         });
     });
 
+    // Pie con canal
     if (hayNoticias) {
         mensajes.push(
             `${SEP}\n📲 Más info en nuestro canal:\nhttps://whatsapp.com/channel/0029Vb6Ml1x0gcfBHsUjPs06`
@@ -431,7 +416,7 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
-// ENVIAR NOTICIAS AL GRUPO
+// ENVIAR NOTICIAS AL GRUPO (USA SCRAPER)
 // ============================================================
 async function sendDailyNews(sock, isManual = false) {
     if (newsInProgress) {
@@ -447,6 +432,7 @@ async function sendDailyNews(sock, isManual = false) {
         await sock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
 
         const { resultados, fechasValidas } = await ejecutarScraper();
+
         const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
 
         for (const msg of mensajes) {
@@ -522,6 +508,7 @@ async function connectToWhatsApp() {
         retryRequestDelayMs: 250
     });
 
+    // Mantener conexión activa
     setInterval(() => {
         if (sock?.user) {
             sock.sendPresenceUpdate('available').catch(() => {});
@@ -538,7 +525,7 @@ async function connectToWhatsApp() {
 
         if (connection === "open") {
             console.log("✅ BOT CONECTADO Y OPERATIVO");
-            console.log("📰 Noticias via scraping (axios + cheerio)");
+            console.log("📰 Noticias via scraping (sin IA)");
             scheduleNews(sock);
         }
 
@@ -614,6 +601,7 @@ async function connectToWhatsApp() {
                 console.log(`❌ Error enviando bienvenida a ${userPhone}: ${e.message}`);
             }
         }
+        // Los mensajes siguientes de usuarios privados se ignoran
     });
 }
 
@@ -621,6 +609,6 @@ async function connectToWhatsApp() {
 // INICIAR BOT
 // ============================================================
 console.log("🚀 Iniciando Ghost Bot...");
-console.log("📰 Noticias: scraping directo (axios + cheerio)");
+console.log("📰 Noticias: scraping directo (sin IA)");
 console.log("👋 Privados: solo saludo inicial");
 connectToWhatsApp();
