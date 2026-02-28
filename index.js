@@ -7,7 +7,8 @@ const makeWASocket = baileys.default;
 const useMultiFileAuthState = baileys.useMultiFileAuthState;
 const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
 const fs = require('fs');
-const { firefox } = require('playwright');
+const axios = require('axios');         // ← reemplaza playwright
+const cheerio = require('cheerio');     // ← reemplaza playwright
 const qrcodeTerminal = require("qrcode-terminal");
 const QRCode = require("qrcode");
 const pino = require("pino");
@@ -62,7 +63,7 @@ const NEWS_SCHEDULE = [
 ];
 
 let lastNewsSentKey = null;
-let newsInProgress = false; // Evitar ejecuciones simultáneas
+let newsInProgress = false;
 
 // Limpieza de memoria cada hora
 setInterval(() => {
@@ -94,6 +95,16 @@ const SITIOS = [
 
 const MAX_NOTICIAS_POR_SITIO = 2;
 const MAX_CHARS_RESUMEN = 900;
+
+// Headers comunes para axios (imitar navegador real)
+const AXIOS_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Cache-Control': 'max-age=0'
+};
 
 // ============================================================
 // SCRAPER — UTILIDADES DE FECHA
@@ -188,9 +199,26 @@ function limpiarTexto(texto) {
 }
 
 // ============================================================
-// SCRAPER — SCRAPING POR SITIO
+// SCRAPER — FETCH CON AXIOS (reemplaza page.goto)
 // ============================================================
-async function scrapearSitio(page, sitio, fechasValidas) {
+async function fetchHTML(url) {
+    const response = await axios.get(url, {
+        headers: AXIOS_HEADERS,
+        timeout: 20000,
+        maxRedirects: 5
+    });
+    return response.data;
+}
+
+// Pausa simple (reemplaza page.waitForTimeout)
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================
+// SCRAPER — SCRAPING POR SITIO (con cheerio)
+// ============================================================
+async function scrapearSitio(sitio, fechasValidas) {
     console.log(`🌐 Scrapeando: ${sitio.nombre}`);
 
     const resultado = {
@@ -202,116 +230,125 @@ async function scrapearSitio(page, sitio, fechasValidas) {
     };
 
     try {
-        await page.goto(sitio.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        // ── Cargar página de sección ──────────────────────────
+        const htmlSeccion = await fetchHTML(sitio.url);
+        const $ = cheerio.load(htmlSeccion);
 
-        try {
-            await page.click('.accept-cookies, .close-popup, .modal-close, .gdrpr-modal-close', { timeout: 2000 });
-        } catch { /* Sin pop-ups */ }
+        // ── Extraer enlaces de artículos ──────────────────────
+        const enlaces = [];
+        $('a[href]').each((_, el) => {
+            const href = $(el).attr('href') || '';
+            const text = $(el).text().trim();
 
-        await page.waitForTimeout(3000);
-        for (let i = 0; i < 3; i++) {
-            await page.evaluate(() => window.scrollBy(0, 500));
-            await page.waitForTimeout(500);
-        }
+            // Normalizar URL relativa
+            let url = href;
+            if (href.startsWith('/')) {
+                url = `https://${sitio.dominio}${href}`;
+            }
 
-        const enlaces = await page.evaluate((dominio) => {
-            const links = Array.from(document.querySelectorAll('a[href]'))
-                .map(a => ({ href: a.href.trim(), text: a.textContent.trim() }))
-                .filter(link =>
-                    link.href.includes(dominio) &&
-                    link.href.length > 60 &&
-                    link.text.length > 15 &&
-                    !link.href.includes('#') &&
-                    !link.href.includes('/seccion/') &&
-                    !link.href.includes('/categoria/') &&
-                    !link.href.includes('/author/') &&
-                    !link.href.includes('/tag/') &&
-                    !link.href.includes('/local/page/') &&
-                    !link.text.toUpperCase().includes('LEER MÁS') &&
-                    !link.text.toUpperCase().includes('CONTINUAR') &&
-                    !link.text.toUpperCase().includes('VER TODAS')
-                );
-            return [...new Map(links.map(l => [l.href, l])).values()].slice(0, 10).map(l => l.href);
-        }, sitio.dominio);
+            if (
+                url.includes(sitio.dominio) &&
+                url.length > 60 &&
+                text.length > 15 &&
+                !url.includes('#') &&
+                !url.includes('/seccion/') &&
+                !url.includes('/categoria/') &&
+                !url.includes('/author/') &&
+                !url.includes('/tag/') &&
+                !url.includes('/local/page/') &&
+                !text.toUpperCase().includes('LEER MÁS') &&
+                !text.toUpperCase().includes('CONTINUAR') &&
+                !text.toUpperCase().includes('VER TODAS')
+            ) {
+                enlaces.push(url);
+            }
+        });
 
-        console.log(`   📌 ${enlaces.length} enlaces encontrados`);
+        // Deduplicar
+        const enlacesUnicos = [...new Set(enlaces)].slice(0, 10);
+        console.log(`   📌 ${enlacesUnicos.length} enlaces encontrados`);
 
-        for (let i = 0; i < enlaces.length && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO; i++) {
-            const url = enlaces[i];
+        // ── Visitar cada artículo ─────────────────────────────
+        for (let i = 0; i < enlacesUnicos.length && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO; i++) {
+            const url = enlacesUnicos[i];
 
             try {
-                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                await page.waitForTimeout(1500);
+                const htmlArticulo = await fetchHTML(url);
+                const $a = cheerio.load(htmlArticulo);
 
-                const datosNoticia = await page.evaluate(() => {
-                    const titular = document.querySelector('h1')?.textContent.trim() ||
-                        document.querySelector('.entry-title, .post-title, .titulo-noticia')?.textContent.trim() ||
-                        'Sin titular';
+                // Titular
+                const titular =
+                    $a('h1').first().text().trim() ||
+                    $a('.entry-title, .post-title, .titulo-noticia').first().text().trim() ||
+                    'Sin titular';
 
-                    let parrafosTexto = [];
-                    const selectoresArticulo = [
-                        'article .entry-content p', 'article .post-content p',
-                        '.entry-content p', '.post-content p', '.contenido p', 'article p'
-                    ];
+                // Resumen: primeros 2 párrafos limpios
+                const parrafos = [];
+                const selectores = [
+                    'article .entry-content p',
+                    'article .post-content p',
+                    '.entry-content p',
+                    '.post-content p',
+                    '.contenido p',
+                    'article p'
+                ];
 
-                    for (const selector of selectoresArticulo) {
-                        if (parrafosTexto.length >= 2) break;
-                        document.querySelectorAll(selector).forEach(p => {
-                            if (parrafosTexto.length >= 2) return;
-                            const texto = p.textContent.trim();
-                            const esCss = texto.includes('{') || texto.includes('font-') ||
-                                          texto.includes('margin') || texto.includes('color:#') ||
-                                          texto.includes('display:') || texto.includes('!important');
-                            if (
-                                texto.length > 60 && !esCss &&
-                                !texto.includes('©') && !texto.includes('todos los derechos') &&
-                                !texto.includes('Publicidad') && !texto.includes('Suscríbete') &&
-                                !texto.includes('Newsletter') && !texto.includes('compartir')
-                            ) {
-                                parrafosTexto.push(texto);
-                            }
-                        });
-                    }
+                for (const selector of selectores) {
+                    if (parrafos.length >= 2) break;
+                    $a(selector).each((_, el) => {
+                        if (parrafos.length >= 2) return;
+                        const texto = $a(el).text().trim();
+                        const esCss = texto.includes('{') || texto.includes('font-') ||
+                                      texto.includes('margin') || texto.includes('color:#') ||
+                                      texto.includes('display:') || texto.includes('!important');
+                        if (
+                            texto.length > 60 && !esCss &&
+                            !texto.includes('©') && !texto.includes('todos los derechos') &&
+                            !texto.includes('Publicidad') && !texto.includes('Suscríbete') &&
+                            !texto.includes('Newsletter') && !texto.includes('compartir')
+                        ) {
+                            parrafos.push(texto);
+                        }
+                    });
+                }
 
-                    const resumen = parrafosTexto.slice(0, 2).join('\n\n');
+                const resumen = parrafos.slice(0, 2).join('\n\n');
 
-                    const posiblesFechas = [
-                        document.querySelector('time')?.getAttribute('datetime'),
-                        document.querySelector('meta[property="article:published_time"]')?.getAttribute('content'),
-                        document.querySelector('meta[name="date"]')?.getAttribute('content'),
-                        document.querySelector('time')?.textContent.trim(),
-                        document.querySelector('.fecha, .post-date, .published, .entry-date')?.textContent.trim()
-                    ];
-                    const fecha = posiblesFechas.find(f => f && f.trim().length > 3 && !f.includes('{')) || 'Fecha no encontrada';
+                // Fecha
+                const posiblesFechas = [
+                    $a('meta[property="article:published_time"]').attr('content'),
+                    $a('meta[name="date"]').attr('content'),
+                    $a('time').attr('datetime'),
+                    $a('time').first().text().trim(),
+                    $a('.fecha, .post-date, .published, .entry-date').first().text().trim()
+                ];
+                const fecha = posiblesFechas.find(f => f && f.trim().length > 3 && !f.includes('{')) || 'Fecha no encontrada';
 
-                    return { titular, resumen, fecha };
-                });
-
-                datosNoticia.titular = limpiarTexto(datosNoticia.titular);
-                datosNoticia.resumen = cortarEnOracionCompleta(limpiarTexto(datosNoticia.resumen), MAX_CHARS_RESUMEN);
-
-                const validacion = esFechaValida(datosNoticia.fecha, fechasValidas);
+                const titularLimpio = limpiarTexto(titular);
+                const resumenLimpio = cortarEnOracionCompleta(limpiarTexto(resumen), MAX_CHARS_RESUMEN);
+                const validacion = esFechaValida(fecha, fechasValidas);
 
                 if (validacion.valida) {
                     resultado.noticias.push({
                         numero: resultado.noticias.length + 1,
                         fechaDetectada: validacion.cual,
-                        fechaLegible: formatearFechaLegible(datosNoticia.fecha),
-                        titular: datosNoticia.titular,
-                        resumen: datosNoticia.resumen
+                        fechaLegible: formatearFechaLegible(fecha),
+                        titular: titularLimpio,
+                        resumen: resumenLimpio
                     });
-                    console.log(`   ✅ ACEPTADA (${validacion.cual}) → "${datosNoticia.titular.slice(0, 55)}"`);
+                    console.log(`   ✅ ACEPTADA (${validacion.cual}) → "${titularLimpio.slice(0, 55)}"`);
                 } else {
-                    console.log(`   ⏭️  DESCARTADA → Fecha: "${datosNoticia.fecha}"`);
-                    const fechaParsed = parsearFechaTexto(datosNoticia.fecha);
+                    console.log(`   ⏭️  DESCARTADA → Fecha: "${fecha}"`);
+                    const fechaParsed = parsearFechaTexto(fecha);
                     if (fechaParsed) {
                         const diffDias = (new Date() - fechaParsed) / (1000 * 60 * 60 * 24);
                         if (diffDias > 3) break;
                     }
                 }
 
-                if (i < enlaces.length - 1 && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO) {
-                    await page.waitForTimeout(1500 + Math.floor(Math.random() * 800));
+                // Pausa cortés entre requests
+                if (i < enlacesUnicos.length - 1 && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO) {
+                    await sleep(1200 + Math.floor(Math.random() * 600));
                 }
 
             } catch (err) {
@@ -342,17 +379,11 @@ async function ejecutarScraper() {
     console.log(`\n📰 Iniciando scraper...`);
     console.log(`📅 HOY: ${fechasValidas.hoy.label} | AYER: ${fechasValidas.ayer.label}`);
 
-    const browser = await firefox.launch({ headless: true });
-    const page    = await browser.newPage();
     const resultados = [];
 
-    try {
-        for (const sitio of SITIOS) {
-            const resultado = await scrapearSitio(page, sitio, fechasValidas);
-            resultados.push(resultado);
-        }
-    } finally {
-        await browser.close();
+    for (const sitio of SITIOS) {
+        const resultado = await scrapearSitio(sitio, fechasValidas);
+        resultados.push(resultado);
     }
 
     return { resultados, fechasValidas };
@@ -405,7 +436,6 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
         });
     });
 
-    // Pie con canal
     if (hayNoticias) {
         mensajes.push(
             `${SEP}\n📲 Más info en nuestro canal:\nhttps://whatsapp.com/channel/0029Vb6Ml1x0gcfBHsUjPs06`
@@ -416,7 +446,7 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
-// ENVIAR NOTICIAS AL GRUPO (USA SCRAPER)
+// ENVIAR NOTICIAS AL GRUPO
 // ============================================================
 async function sendDailyNews(sock, isManual = false) {
     if (newsInProgress) {
@@ -432,12 +462,11 @@ async function sendDailyNews(sock, isManual = false) {
         await sock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
 
         const { resultados, fechasValidas } = await ejecutarScraper();
-
         const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
 
         for (const msg of mensajes) {
             await sock.sendMessage(NEWS_GROUP_ID, { text: msg });
-            await new Promise(resolve => setTimeout(resolve, 1500));
+            await sleep(1500);
         }
 
         const timestamp = new Date().toLocaleTimeString('es-MX');
@@ -508,7 +537,6 @@ async function connectToWhatsApp() {
         retryRequestDelayMs: 250
     });
 
-    // Mantener conexión activa
     setInterval(() => {
         if (sock?.user) {
             sock.sendPresenceUpdate('available').catch(() => {});
@@ -525,7 +553,7 @@ async function connectToWhatsApp() {
 
         if (connection === "open") {
             console.log("✅ BOT CONECTADO Y OPERATIVO");
-            console.log("📰 Noticias via scraping (sin IA)");
+            console.log("📰 Noticias via scraping con axios+cheerio");
             scheduleNews(sock);
         }
 
@@ -555,7 +583,6 @@ async function connectToWhatsApp() {
         const remoteJid = m.key.remoteJid;
         const text = (m.message.conversation || m.message.extendedTextMessage?.text || "").trim();
 
-        // ── Grupo de noticias: solo escuchar comando manual ─────
         if (remoteJid === NEWS_GROUP_ID) {
             if (text.toLowerCase() === "@sendinstructionsnotice") {
                 console.log("🔧 Comando manual recibido: Enviando noticias...");
@@ -564,10 +591,8 @@ async function connectToWhatsApp() {
             return;
         }
 
-        // ── Ignorar otros grupos ────────────────────────────────
         if (remoteJid.endsWith("@g.us")) return;
 
-        // ── Mensajes privados: solo saludo inicial ──────────────
         const userPhone = remoteJid.split('@')[0];
 
         if (!firstTimeUsers.has(remoteJid)) {
@@ -586,7 +611,7 @@ async function connectToWhatsApp() {
                     await sock.sendMessage(remoteJid, { text: welcomeText });
                 }
 
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await sleep(1000);
 
                 if (fs.existsSync(audioPath)) {
                     await sock.sendMessage(remoteJid, {
@@ -601,7 +626,6 @@ async function connectToWhatsApp() {
                 console.log(`❌ Error enviando bienvenida a ${userPhone}: ${e.message}`);
             }
         }
-        // Los mensajes siguientes de usuarios privados se ignoran
     });
 }
 
@@ -609,6 +633,6 @@ async function connectToWhatsApp() {
 // INICIAR BOT
 // ============================================================
 console.log("🚀 Iniciando Ghost Bot...");
-console.log("📰 Noticias: scraping directo (sin IA)");
+console.log("📰 Noticias: axios + cheerio (sin Playwright)");
 console.log("👋 Privados: solo saludo inicial");
 connectToWhatsApp();
