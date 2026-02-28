@@ -58,7 +58,7 @@ const firstTimeUsers = new Set();
 const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID = "120363371012169967@g.us";
 const NEWS_SCHEDULE = [
-    { hour: 9, minute: 10 },
+    { hour: 00, minute: 25 },
     { hour: 19, minute: 50 }
 ];
 
@@ -636,3 +636,4 @@ console.log("🚀 Iniciando Ghost Bot...");
 console.log("📰 Noticias: axios + cheerio (sin Playwright)");
 console.log("👋 Privados: solo saludo inicial");
 connectToWhatsApp();
+
