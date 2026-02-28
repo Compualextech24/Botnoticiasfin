@@ -26,7 +26,6 @@ function ts() {
     });
 }
 
-// Parchear console para siempre mostrar hora real
 const _log   = console.log.bind(console);
 const _error = console.error.bind(console);
 console.log   = (...a) => _log(`[${ts()}]`, ...a);
@@ -41,12 +40,12 @@ console.error = (...args) => {
 };
 
 // ============================================================
-// SERVIDOR QR + AUTO-PING (evita que Render duerma el servicio)
+// SERVIDOR QR + AUTO-PING
 // ============================================================
 let latestQr = null;
 const PORT = process.env.PORT || 3000;
 
-const server = http.createServer(async (req, res) => {
+http.createServer(async (req, res) => {
     if (req.url === "/qr" && latestQr) {
         const img = await QRCode.toDataURL(latestQr);
         res.writeHead(200, { "Content-Type": "text/html" });
@@ -58,12 +57,10 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("Bot Online");
     }
-});
-
-server.listen(PORT, () => {
+}).listen(PORT, () => {
     console.log(`Servidor HTTP en puerto ${PORT}`);
 
-    // Auto-ping cada 10 minutos para que Render no duerma el servicio
+    // Auto-ping cada 10 min para que Render no duerma el servicio
     const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
     setInterval(async () => {
         try {
@@ -90,34 +87,20 @@ const NEWS_SCHEDULE  = [
 
 let lastNewsSentKey  = null;
 let newsInProgress   = false;
-let newsScheduled    = false; // FLAG: evita apilar setIntervals en cada reconexion
-let keepAliveStarted = false; // FLAG: evita apilar keepalive en cada reconexion
+let newsScheduled    = false;
+let keepAliveStarted = false;
 
 setInterval(() => {
-    if (firstTimeUsers.size > MAX_CACHE_SIZE) {
-        firstTimeUsers.clear();
-        console.log("Cache de usuarios limpiado");
-    }
-    if (processedMessages.size > 1000) {
-        processedMessages.clear();
-        console.log("Cache de mensajes limpiado");
-    }
+    if (firstTimeUsers.size > MAX_CACHE_SIZE)  { firstTimeUsers.clear();    console.log("Cache usuarios limpiado"); }
+    if (processedMessages.size > 1000)         { processedMessages.clear(); console.log("Cache mensajes limpiado"); }
 }, 3600000);
 
 // ============================================================
 // SCRAPER — CONFIGURACION
 // ============================================================
 const SITIOS = [
-    {
-        nombre: 'UM Noticias',
-        url:    'https://umnoticias.com.mx/seccion/local/',
-        dominio:'umnoticias.com.mx'
-    },
-    {
-        nombre: 'Zona Franca',
-        url:    'https://zonafranca.mx/local/',
-        dominio:'zonafranca.mx'
-    }
+    { nombre: 'UM Noticias', url: 'https://umnoticias.com.mx/seccion/local/', dominio: 'umnoticias.com.mx' },
+    { nombre: 'Zona Franca', url: 'https://zonafranca.mx/local/',             dominio: 'zonafranca.mx'     }
 ];
 
 const MAX_NOTICIAS_POR_SITIO = 2;
@@ -133,47 +116,38 @@ const AXIOS_HEADERS = {
 };
 
 // ============================================================
-// SCRAPER — UTILIDADES DE FECHA
+// SCRAPER — FECHAS
 // ============================================================
 function getFechasValidas() {
     const hoy  = new Date();
     const ayer = new Date();
     ayer.setDate(hoy.getDate() - 1);
-
-    const formatear = (d) => ({
+    const fmt = (d) => ({
         iso:   d.toISOString().split('T')[0],
         label: d.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })
     });
-
-    return { hoy: formatear(hoy), ayer: formatear(ayer) };
+    return { hoy: fmt(hoy), ayer: fmt(ayer) };
 }
 
 function parsearFechaTexto(textoFecha) {
     if (!textoFecha || textoFecha === 'Fecha no encontrada') return null;
-
     const texto = textoFecha.toLowerCase().trim();
     const meses = {
         enero:1, febrero:2, marzo:3, abril:4, mayo:5, junio:6,
         julio:7, agosto:8, septiembre:9, octubre:10, noviembre:11, diciembre:12,
-        jan:1, feb:2, mar:3, apr:4, may:5, jun:6,
-        jul:7, aug:8, sep:9, oct:10, nov:11, dec:12
+        jan:1, feb:2, mar:3, apr:4, may:5, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12
     };
-
-    let m = texto.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+    let m;
+    m = texto.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
     if (m) return new Date(+m[1], +m[2]-1, +m[3]);
-
     m = texto.match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
     if (m) return new Date(+m[3], +m[2]-1, +m[1]);
-
     m = texto.match(/(\d{1,2})\s+(?:de\s+)?([a-z\u00e1\u00e9\u00ed\u00f3\u00fa]+)\s+(?:de\s+)?(\d{4})/);
     if (m && meses[m[2]]) return new Date(+m[3], meses[m[2]]-1, +m[1]);
-
     m = texto.match(/([a-z\u00e1\u00e9\u00ed\u00f3\u00fa]+)\s+(\d{1,2}),?\s+(\d{4})/);
     if (m && meses[m[1]]) return new Date(+m[3], meses[m[1]]-1, +m[2]);
-
     const intento = new Date(textoFecha);
     if (!isNaN(intento.getTime())) return intento;
-
     return null;
 }
 
@@ -193,21 +167,14 @@ function formatearFechaLegible(textoFecha) {
 }
 
 // ============================================================
-// SCRAPER — LIMPIEZA DE TEXTO
+// SCRAPER — LIMPIEZA
 // ============================================================
 function cortarEnOracionCompleta(texto, maxChars) {
     if (!texto || texto.length <= maxChars) return texto;
-
-    const fragmento   = texto.slice(0, maxChars);
-    const ultimoPunto = Math.max(
-        fragmento.lastIndexOf('.'),
-        fragmento.lastIndexOf('!'),
-        fragmento.lastIndexOf('?')
-    );
-
-    if (ultimoPunto > maxChars * 0.5) return texto.slice(0, ultimoPunto + 1).trim();
-
-    const corte = Math.max(fragmento.lastIndexOf(','), fragmento.lastIndexOf(' '));
+    const frag = texto.slice(0, maxChars);
+    const punto = Math.max(frag.lastIndexOf('.'), frag.lastIndexOf('!'), frag.lastIndexOf('?'));
+    if (punto > maxChars * 0.5) return texto.slice(0, punto + 1).trim();
+    const corte = Math.max(frag.lastIndexOf(','), frag.lastIndexOf(' '));
     return texto.slice(0, corte).trim() + '...';
 }
 
@@ -222,107 +189,62 @@ function limpiarTexto(texto) {
         .trim();
 }
 
-// ============================================================
-// SCRAPER — FETCH Y PAUSA
-// ============================================================
 async function fetchHTML(url) {
-    const response = await axios.get(url, {
-        headers: AXIOS_HEADERS,
-        timeout: 20000,
-        maxRedirects: 5
-    });
-    return response.data;
+    const r = await axios.get(url, { headers: AXIOS_HEADERS, timeout: 20000, maxRedirects: 5 });
+    return r.data;
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ============================================================
 // SCRAPER — SCRAPING POR SITIO
 // ============================================================
 async function scrapearSitio(sitio, fechasValidas) {
     console.log(`Scrapeando: ${sitio.nombre}`);
-
-    const resultado = {
-        sitio: sitio.nombre,
-        url: sitio.url,
-        noticias: [],
-        sinNoticias: false,
-        error: null
-    };
+    const resultado = { sitio: sitio.nombre, noticias: [], sinNoticias: false, error: null };
 
     try {
-        const htmlSeccion = await fetchHTML(sitio.url);
-        const $ = cheerio.load(htmlSeccion);
-
+        const $ = cheerio.load(await fetchHTML(sitio.url));
         const enlaces = [];
+
         $('a[href]').each((_, el) => {
             const href = $(el).attr('href') || '';
             const text = $(el).text().trim();
-
-            let url = href;
-            if (href.startsWith('/')) url = `https://${sitio.dominio}${href}`;
-
+            let url = href.startsWith('/') ? `https://${sitio.dominio}${href}` : href;
             if (
-                url.includes(sitio.dominio) &&
-                url.length > 60 &&
-                text.length > 15 &&
-                !url.includes('#') &&
-                !url.includes('/seccion/') &&
-                !url.includes('/categoria/') &&
-                !url.includes('/author/') &&
-                !url.includes('/tag/') &&
-                !url.includes('/local/page/') &&
-                !text.toUpperCase().includes('LEER MAS') &&
-                !text.toUpperCase().includes('CONTINUAR') &&
+                url.includes(sitio.dominio) && url.length > 60 && text.length > 15 &&
+                !url.includes('#') && !url.includes('/seccion/') && !url.includes('/categoria/') &&
+                !url.includes('/author/') && !url.includes('/tag/') && !url.includes('/local/page/') &&
+                !text.toUpperCase().includes('LEER MAS') && !text.toUpperCase().includes('CONTINUAR') &&
                 !text.toUpperCase().includes('VER TODAS')
-            ) {
-                enlaces.push(url);
-            }
+            ) enlaces.push(url);
         });
 
         const enlacesUnicos = [...new Set(enlaces)].slice(0, 10);
-        console.log(`   ${enlacesUnicos.length} enlaces encontrados en ${sitio.nombre}`);
+        console.log(`   ${enlacesUnicos.length} enlaces en ${sitio.nombre}`);
 
         for (let i = 0; i < enlacesUnicos.length && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO; i++) {
-            const url = enlacesUnicos[i];
-
             try {
-                const htmlArticulo = await fetchHTML(url);
-                const $a = cheerio.load(htmlArticulo);
+                const $a = cheerio.load(await fetchHTML(enlacesUnicos[i]));
 
-                const titular =
-                    $a('h1').first().text().trim() ||
-                    $a('.entry-title, .post-title, .titulo-noticia').first().text().trim() ||
-                    'Sin titular';
+                const titular = $a('h1').first().text().trim() ||
+                    $a('.entry-title, .post-title, .titulo-noticia').first().text().trim() || 'Sin titular';
 
-                const parrafos  = [];
-                const selectores = [
-                    'article .entry-content p', 'article .post-content p',
-                    '.entry-content p', '.post-content p', '.contenido p', 'article p'
-                ];
-
-                for (const selector of selectores) {
+                const parrafos = [];
+                for (const sel of ['article .entry-content p','article .post-content p','.entry-content p','.post-content p','.contenido p','article p']) {
                     if (parrafos.length >= 2) break;
-                    $a(selector).each((_, el) => {
+                    $a(sel).each((_, el) => {
                         if (parrafos.length >= 2) return;
-                        const texto = $a(el).text().trim();
-                        const esCss = texto.includes('{') || texto.includes('font-') ||
-                                      texto.includes('margin') || texto.includes('color:#') ||
-                                      texto.includes('display:') || texto.includes('!important');
-                        if (
-                            texto.length > 60 && !esCss &&
-                            !texto.includes('©') && !texto.includes('todos los derechos') &&
-                            !texto.includes('Publicidad') && !texto.includes('Suscribete') &&
-                            !texto.includes('Newsletter') && !texto.includes('compartir')
-                        ) {
-                            parrafos.push(texto);
-                        }
+                        const t = $a(el).text().trim();
+                        const esCss = t.includes('{') || t.includes('font-') || t.includes('margin') ||
+                                      t.includes('color:#') || t.includes('display:') || t.includes('!important');
+                        if (t.length > 60 && !esCss &&
+                            !t.includes('©') && !t.includes('todos los derechos') &&
+                            !t.includes('Publicidad') && !t.includes('Suscribete') &&
+                            !t.includes('Newsletter') && !t.includes('compartir'))
+                            parrafos.push(t);
                     });
                 }
-
-                const resumen = parrafos.slice(0, 2).join('\n\n');
 
                 const posiblesFechas = [
                     $a('meta[property="article:published_time"]').attr('content'),
@@ -334,12 +256,11 @@ async function scrapearSitio(sitio, fechasValidas) {
                 const fecha = posiblesFechas.find(f => f && f.trim().length > 3 && !f.includes('{')) || 'Fecha no encontrada';
 
                 const titularLimpio = limpiarTexto(titular);
-                const resumenLimpio = cortarEnOracionCompleta(limpiarTexto(resumen), MAX_CHARS_RESUMEN);
+                const resumenLimpio = cortarEnOracionCompleta(limpiarTexto(parrafos.slice(0, 2).join('\n\n')), MAX_CHARS_RESUMEN);
                 const validacion    = esFechaValida(fecha, fechasValidas);
 
                 if (validacion.valida) {
                     resultado.noticias.push({
-                        numero: resultado.noticias.length + 1,
                         fechaDetectada: validacion.cual,
                         fechaLegible:   formatearFechaLegible(fecha),
                         titular:  titularLimpio,
@@ -348,28 +269,20 @@ async function scrapearSitio(sitio, fechasValidas) {
                     console.log(`   ACEPTADA (${validacion.cual}): "${titularLimpio.slice(0, 55)}"`);
                 } else {
                     console.log(`   DESCARTADA - Fecha: "${fecha}"`);
-                    const fechaParsed = parsearFechaTexto(fecha);
-                    if (fechaParsed) {
-                        const diffDias = (new Date() - fechaParsed) / (1000 * 60 * 60 * 24);
-                        if (diffDias > 3) break;
-                    }
+                    const fp = parsearFechaTexto(fecha);
+                    if (fp && (new Date() - fp) / 86400000 > 3) break;
                 }
 
-                if (i < enlacesUnicos.length - 1 && resultado.noticias.length < MAX_NOTICIAS_POR_SITIO) {
+                if (resultado.noticias.length < MAX_NOTICIAS_POR_SITIO)
                     await sleep(1200 + Math.floor(Math.random() * 600));
-                }
 
-            } catch (err) {
-                console.log(`   Error en enlace: ${err.message}`);
-            }
+            } catch (err) { console.log(`   Error enlace: ${err.message}`); }
         }
 
-        if (resultado.noticias.length === 0) {
-            resultado.sinNoticias = true;
-            console.log(`Sin noticias validas en ${sitio.nombre}`);
-        } else {
-            console.log(`${resultado.noticias.length} noticia(s) obtenida(s) de ${sitio.nombre}`);
-        }
+        resultado.sinNoticias = resultado.noticias.length === 0;
+        console.log(resultado.sinNoticias
+            ? `Sin noticias validas en ${sitio.nombre}`
+            : `${resultado.noticias.length} noticia(s) de ${sitio.nombre}`);
 
     } catch (err) {
         resultado.error = err.message;
@@ -379,111 +292,68 @@ async function scrapearSitio(sitio, fechasValidas) {
     return resultado;
 }
 
-// ============================================================
-// SCRAPER — EJECUTAR TODOS LOS SITIOS
-// ============================================================
 async function ejecutarScraper() {
     const fechasValidas = getFechasValidas();
-    console.log(`Iniciando scraper - HOY: ${fechasValidas.hoy.label} | AYER: ${fechasValidas.ayer.label}`);
-
+    console.log(`Scraper iniciado - HOY: ${fechasValidas.hoy.label} | AYER: ${fechasValidas.ayer.label}`);
     const resultados = [];
-    for (const sitio of SITIOS) {
-        const resultado = await scrapearSitio(sitio, fechasValidas);
-        resultados.push(resultado);
-    }
-
+    for (const sitio of SITIOS) resultados.push(await scrapearSitio(sitio, fechasValidas));
     return { resultados, fechasValidas };
 }
 
 // ============================================================
-// SCRAPER — FORMATEAR PARA WHATSAPP
+// FORMATEAR PARA WHATSAPP
 // ============================================================
 function formatearParaWhatsApp(resultados, fechasValidas) {
     const SEP = '\u2501'.repeat(30);
-    let mensajes = [];
+    const mensajes = [];
     let noticiaGlobal = 1;
     let hayNoticias   = false;
 
-    let encabezado  = `\uD83D\uDCE1 *NOTICIAS LOCALES*\n`;
-    encabezado     += `\uD83D\uDCCD Le\u00f3n, Guanajuato\n`;
-    encabezado     += `\uD83D\uDCC5 ${fechasValidas.hoy.label}\n`;
-    encabezado     += SEP;
-    mensajes.push(encabezado);
+    mensajes.push(`\uD83D\uDCE1 *NOTICIAS LOCALES*\n\uD83D\uDCCD Le\u00f3n, Guanajuato\n\uD83D\uDCC5 ${fechasValidas.hoy.label}\n${SEP}`);
 
-    resultados.forEach((resultado) => {
-        if (resultado.error) {
-            mensajes.push(`\u26A0\uFE0F *${resultado.sitio}*: No se pudo acceder al sitio.`);
-            return;
-        }
+    for (const r of resultados) {
+        if (r.error) { mensajes.push(`\u26A0\uFE0F *${r.sitio}*: No se pudo acceder.`); continue; }
+        if (r.sinNoticias || !r.noticias.length) { mensajes.push(`\uD83D\uDCED *${r.sitio}*\nSin noticias recientes.`); continue; }
 
-        if (resultado.sinNoticias || resultado.noticias.length === 0) {
-            mensajes.push(`\uD83D\uDCED *${resultado.sitio}*\nSin noticias recientes para hoy.`);
-            return;
-        }
-
-        resultado.noticias.forEach((n) => {
+        for (const n of r.noticias) {
             hayNoticias = true;
-            const etiqueta = n.fechaDetectada === 'hoy' ? '\u2705 HOY' : '\uD83D\uDCC6 AYER';
-
-            let msg = '';
-            msg += `\uD83D\uDCF0 *NOTICIA ${noticiaGlobal}*\n`;
-            msg += `${SEP}\n`;
-            msg += `*${n.titular.toUpperCase()}*\n`;
-            msg += `\uD83D\uDCC5 ${n.fechaLegible}  ${etiqueta}\n`;
-            msg += `\uD83D\uDD39 *${resultado.sitio}*\n`;
-            msg += `${SEP}\n`;
-            msg += `\uD83D\uDCDD *RESUMEN:*\n\n`;
-            msg += n.resumen;
-
-            mensajes.push(msg);
-            noticiaGlobal++;
-        });
-    });
-
-    if (hayNoticias) {
-        mensajes.push(
-            `${SEP}\n\uD83D\uDCF2 M\u00e1s info en nuestro canal:\nhttps://whatsapp.com/channel/0029Vb6Ml1x0gcfBHsUjPs06`
-        );
+            const etq = n.fechaDetectada === 'hoy' ? '\u2705 HOY' : '\uD83D\uDCC6 AYER';
+            mensajes.push(
+                `\uD83D\uDCF0 *NOTICIA ${noticiaGlobal++}*\n${SEP}\n` +
+                `*${n.titular.toUpperCase()}*\n` +
+                `\uD83D\uDCC5 ${n.fechaLegible}  ${etq}\n` +
+                `\uD83D\uDD39 *${r.sitio}*\n${SEP}\n` +
+                `\uD83D\uDCDD *RESUMEN:*\n\n${n.resumen}`
+            );
+        }
     }
+
+    if (hayNoticias)
+        mensajes.push(`${SEP}\n\uD83D\uDCF2 M\u00e1s info:\nhttps://whatsapp.com/channel/0029Vb6Ml1x0gcfBHsUjPs06`);
 
     return mensajes;
 }
 
 // ============================================================
-// ENVIAR NOTICIAS AL GRUPO
+// ENVIAR NOTICIAS
 // ============================================================
 async function sendDailyNews(sock, isManual = false) {
-    if (newsInProgress) {
-        console.log("Scraper ya en ejecucion, ignorando solicitud duplicada.");
-        return false;
-    }
-
+    if (newsInProgress) { console.log("Scraper ya en ejecucion, ignorando."); return false; }
     newsInProgress = true;
     const label = isManual ? ' (Manual)' : '';
-    console.log(`Iniciando envio de noticias${label}...`);
+    console.log(`Enviando noticias${label}...`);
 
     try {
         await sock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
-
         const { resultados, fechasValidas } = await ejecutarScraper();
         const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
-
-        for (const msg of mensajes) {
-            await sock.sendMessage(NEWS_GROUP_ID, { text: msg });
-            await sleep(1500);
-        }
-
-        const totalNoticias = resultados.reduce((acc, r) => acc + (r.noticias?.length || 0), 0);
-        console.log(`NOTICIAS ENVIADAS${label} - ${totalNoticias} noticias`);
+        for (const msg of mensajes) { await sock.sendMessage(NEWS_GROUP_ID, { text: msg }); await sleep(1500); }
+        const total = resultados.reduce((a, r) => a + (r.noticias?.length || 0), 0);
+        console.log(`NOTICIAS ENVIADAS${label} - ${total} noticias`);
         return true;
-
     } catch (err) {
-        console.error(`ERROR AL ENVIAR NOTICIAS: ${err.message}`);
-        try {
-            await sock.sendMessage(NEWS_GROUP_ID, {
-                text: "\u26A0\uFE0F Hubo un problema al obtener las noticias. Se intentara en el siguiente horario."
-            });
-        } catch (e) { /* ignorar */ }
+        console.error(`ERROR AL ENVIAR: ${err.message}`);
+        try { await sock.sendMessage(NEWS_GROUP_ID, { text: "\u26A0\uFE0F Error al obtener noticias. Se reintentara en el siguiente horario." }); } catch {}
         return false;
     } finally {
         newsInProgress = false;
@@ -492,25 +362,17 @@ async function sendDailyNews(sock, isManual = false) {
 
 // ============================================================
 // PROGRAMAR NOTICIAS
-// FLAG newsScheduled evita apilar setIntervals en cada reconexion
 // ============================================================
 function scheduleNews(sock) {
     if (newsScheduled) return;
     newsScheduled = true;
-
     console.log("Horarios programados:");
-    NEWS_SCHEDULE.forEach(s => {
-        console.log(`   ${String(s.hour).padStart(2,'0')}:${String(s.minute).padStart(2,'0')}`);
-    });
+    NEWS_SCHEDULE.forEach(s => console.log(`   ${String(s.hour).padStart(2,'0')}:${String(s.minute).padStart(2,'0')}`));
 
     setInterval(() => {
         const now     = new Date();
         const timeKey = `${now.toDateString()}-${now.getHours()}:${now.getMinutes()}`;
-        const shouldSend = NEWS_SCHEDULE.some(s =>
-            s.hour === now.getHours() && s.minute === now.getMinutes()
-        );
-
-        if (shouldSend && lastNewsSentKey !== timeKey) {
+        if (NEWS_SCHEDULE.some(s => s.hour === now.getHours() && s.minute === now.getMinutes()) && lastNewsSentKey !== timeKey) {
             lastNewsSentKey = timeKey;
             sendDailyNews(sock);
         }
@@ -525,8 +387,7 @@ async function connectToWhatsApp() {
     const { version }          = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
-        version,
-        auth: state,
+        version, auth: state,
         logger: pino({ level: "silent" }),
         printQRInTerminal: false,
         browser: ['Ghost Bot', 'Chrome', '121.0.0'],
@@ -543,14 +404,9 @@ async function connectToWhatsApp() {
         retryRequestDelayMs:   250
     });
 
-    // FLAG keepAliveStarted evita apilar el interval en cada reconexion
     if (!keepAliveStarted) {
         keepAliveStarted = true;
-        setInterval(() => {
-            if (sock?.user) {
-                sock.sendPresenceUpdate('available').catch(() => {});
-            }
-        }, 50000);
+        setInterval(() => { if (sock?.user) sock.sendPresenceUpdate('available').catch(() => {}); }, 50000);
     }
 
     sock.ev.on("connection.update", (update) => {
@@ -569,13 +425,16 @@ async function connectToWhatsApp() {
 
         if (connection === "close") {
             const code = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = code !== 401;
-            console.log(`Conexion cerrada (codigo: ${code ?? 'desconocido'})`);
+
+            // ⭐ CLAVE: 401=sesion invalida, 440=reemplazada, 428=forzada — NO reconectar
+            const shouldReconnect = code !== 401 && code !== 440 && code !== 428;
+
+            console.log(`Conexion cerrada (codigo: ${code ?? 'desconocido'}) - ${shouldReconnect ? 'reconectando en 5s' : 'STOP definitivo'}`);
+
             if (shouldReconnect) {
-                console.log("Reconectando en 5s...");
                 setTimeout(connectToWhatsApp, 5000);
             } else {
-                console.log("Sesion invalida. Elimina carpeta auth_info y escanea QR de nuevo");
+                console.log("Bot detenido. Si fue intencional, sube el auth_info a GitHub y redespliega.");
             }
         }
     });
@@ -597,15 +456,13 @@ async function connectToWhatsApp() {
 
         if (remoteJid === NEWS_GROUP_ID) {
             if (text.toLowerCase() === "@sendinstructionsnotice") {
-                console.log("Comando manual recibido: Enviando noticias...");
+                console.log("Comando manual: enviando noticias...");
                 await sendDailyNews(sock, true);
             }
             return;
         }
 
         if (remoteJid.endsWith("@g.us")) return;
-
-        const userPhone = remoteJid.split('@')[0];
 
         if (!firstTimeUsers.has(remoteJid)) {
             firstTimeUsers.add(remoteJid);
@@ -615,34 +472,24 @@ async function connectToWhatsApp() {
 
             try {
                 if (fs.existsSync(imagePath)) {
-                    await sock.sendMessage(remoteJid, {
-                        image: fs.readFileSync(imagePath),
-                        caption: welcomeText
-                    });
+                    await sock.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption: welcomeText });
                 } else {
                     await sock.sendMessage(remoteJid, { text: welcomeText });
                 }
-
                 await sleep(1000);
-
                 if (fs.existsSync(audioPath)) {
-                    await sock.sendMessage(remoteJid, {
-                        audio: fs.readFileSync(audioPath),
-                        mimetype: 'audio/ogg; codecs=opus',
-                        ptt: true
-                    });
+                    await sock.sendMessage(remoteJid, { audio: fs.readFileSync(audioPath), mimetype: 'audio/ogg; codecs=opus', ptt: true });
                 }
-
-                console.log(`Nuevo usuario saludado: ${userPhone}`);
+                console.log(`Nuevo usuario saludado: ${remoteJid.split('@')[0]}`);
             } catch (e) {
-                console.log(`Error enviando bienvenida a ${userPhone}: ${e.message}`);
+                console.log(`Error bienvenida: ${e.message}`);
             }
         }
     });
 }
 
 // ============================================================
-// INICIAR BOT
+// ARRANQUE
 // ============================================================
 console.log("Iniciando Ghost Bot...");
 console.log(`Zona horaria: ${process.env.TZ || 'America/Mexico_City'}`);
