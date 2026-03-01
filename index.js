@@ -82,7 +82,7 @@ const firstTimeUsers    = new Set();
 const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
-    { hour: 0,  minute: 25 },
+    { hour: 10,  minute: 45 },
     { hour: 21, minute: 55 }
 ];
 
@@ -575,5 +575,6 @@ async function connectToWhatsApp() {
 console.log("Iniciando Ghost Bot...");
 console.log(`Zona horaria: ${process.env.TZ || 'America/Mexico_City'}`);
 connectToWhatsApp();
+
 
 
