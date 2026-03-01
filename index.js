@@ -80,7 +80,7 @@ const firstTimeUsers    = new Set();
 const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
-    { hour: 12, minute: 05 },
+    { hour: 12, minute: 25 },
     { hour: 21, minute: 55 }
 ];
 
@@ -110,37 +110,30 @@ const SITIOS = [
     },
     {
         nombre:   'Zona Franca',
-        url:      'https://zonafranca.mx/local/',
+        // ✅ Usar RSS feed para evitar el bloqueo HTTP 403 de Cloudflare
+        // El RSS es XML público y generalmente no está protegido por Cloudflare
+        url:      'https://zonafranca.mx/feed/',
+        urlFallback: 'https://zonafranca.mx/category/local/feed/',
         dominio:  'zonafranca.mx',
-        tipo:     'wordpress',
-        // ✅ Headers extra para Cloudflare/anti-bot
-        headersExtra: {
-            'Referer':      'https://www.google.com.mx/',
-            'sec-ch-ua':    '"Chromium";v="121", "Not A(Brand";v="99"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'cross-site',
-            'Upgrade-Insecure-Requests': '1',
-            'DNT': '1'
-        }
+        tipo:     'rss'
     },
     {
         nombre:   'Entérate León',
-        url:      'https://enterate.leon.gob.mx/',
-        dominio:  'enterate.leon.gob.mx',
-        tipo:     'gobierno',
-        // ✅ Selectores específicos para portal de gobierno
+        // ✅ Probar primero la sección de comunicados (más activa y con fechas limpias)
+        url:          'https://enterate.leon.gob.mx/?cat=comunicados',
+        urlFallback:  'https://enterate.leon.gob.mx/',
+        dominio:      'enterate.leon.gob.mx',
+        tipo:         'gobierno',
         selectoresLista: [
-            'article a[href]',
-            '.entry a[href]',
-            '.post a[href]',
-            '.news-item a[href]',
+            'h1 a[href]',
             'h2 a[href]',
             'h3 a[href]',
+            'h4 a[href]',
+            'article a[href]',
+            '.entry-title a[href]',
+            '.post-title a[href]',
             '.titulo a[href]',
-            '.noticia a[href]'
+            'a[href*="enterate.leon.gob.mx"]'
         ]
     }
 ];
@@ -176,17 +169,32 @@ function getBaseHeaders(extra = {}) {
 }
 
 // ============================================================
-// SCRAPER — FECHAS
+// SCRAPER — FECHAS (con soporte para fechas relativas y UTC)
 // ============================================================
 function getFechasValidas() {
-    const hoy  = new Date();
-    const ayer = new Date();
+    // ✅ Usar hora local México, no UTC
+    const ahora = new Date();
+    const tz    = process.env.TZ || 'America/Mexico_City';
+
+    // Fecha de hoy en México
+    const hoyStr = ahora.toLocaleDateString('es-MX', {
+        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'
+    }); // "DD/MM/YYYY"
+    const [hd, hm, hy] = hoyStr.split('/');
+    const hoy = new Date(+hy, +hm - 1, +hd);
+
+    const ayer = new Date(hoy);
     ayer.setDate(hoy.getDate() - 1);
+
+    const antier = new Date(hoy);
+    antier.setDate(hoy.getDate() - 2);
+
     const fmt = (d) => ({
-        iso:   d.toISOString().split('T')[0],
+        iso:   `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`,
         label: d.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })
     });
-    return { hoy: fmt(hoy), ayer: fmt(ayer) };
+
+    return { hoy: fmt(hoy), ayer: fmt(ayer), antier: fmt(antier), ahora };
 }
 
 function parsearFechaTexto(textoFecha) {
@@ -198,14 +206,44 @@ function parsearFechaTexto(textoFecha) {
         jan:1, feb:2, mar:3, apr:4, may:5, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12
     };
     let m;
+
+    // ✅ FIX: Fechas relativas "Hace X minutos/horas/días" (Entérate León y similares)
+    m = texto.match(/hace\s+(\d+)\s+(minuto|minutos|hora|horas|día|dias|dia)/);
+    if (m) {
+        const n = parseInt(m[1]);
+        const unidad = m[2];
+        const ahora = new Date();
+        if (unidad.startsWith('minuto'))  ahora.setMinutes(ahora.getMinutes() - n);
+        else if (unidad.startsWith('hora')) ahora.setHours(ahora.getHours() - n);
+        else if (unidad.startsWith('d'))   ahora.setDate(ahora.getDate() - n);
+        return ahora;
+    }
+
+    // "Hace X semanas" = probablemente viejo
+    if (texto.match(/hace\s+\d+\s+(semana|semanas|mes|meses|año|años)/)) {
+        return new Date(2000, 0, 1); // fecha muy antigua para que se descarte
+    }
+
+    // ISO: 2026-03-01 o 2026-03-01T10:45:00+00:00
     m = texto.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
-    if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+    if (m) {
+        // ✅ FIX UTC→México: si el ISO tiene hora, ajustar a zona local
+        if (textoFecha.includes('T') || textoFecha.includes('+') || textoFecha.endsWith('Z')) {
+            const d = new Date(textoFecha);
+            if (!isNaN(d.getTime())) return d; // JS convierte UTC→local automáticamente
+        }
+        return new Date(+m[1], +m[2]-1, +m[3]);
+    }
+
     m = texto.match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
     if (m) return new Date(+m[3], +m[2]-1, +m[1]);
-    m = texto.match(/(\d{1,2})\s+(?:de\s+)?([a-záéíóú]+)\s+(?:de\s+)?(\d{4})/);
+
+    m = texto.match(/(\d{1,2})\s+(?:de\s+)?([a-záéíóúü]+)\s+(?:de\s+)?(\d{4})/);
     if (m && meses[m[2]]) return new Date(+m[3], meses[m[2]]-1, +m[1]);
-    m = texto.match(/([a-záéíóú]+)\s+(\d{1,2}),?\s+(\d{4})/);
+
+    m = texto.match(/([a-záéíóúü]+)\s+(\d{1,2}),?\s+(\d{4})/);
     if (m && meses[m[1]]) return new Date(+m[3], meses[m[1]]-1, +m[2]);
+
     const intento = new Date(textoFecha);
     if (!isNaN(intento.getTime())) return intento;
     return null;
@@ -214,9 +252,13 @@ function parsearFechaTexto(textoFecha) {
 function esFechaValida(textoFecha, fechasValidas) {
     const fecha = parsearFechaTexto(textoFecha);
     if (!fecha) return { valida: false, cual: null };
-    const iso = fecha.toISOString().split('T')[0];
-    if (iso === fechasValidas.hoy.iso)  return { valida: true, cual: 'hoy' };
-    if (iso === fechasValidas.ayer.iso) return { valida: true, cual: 'ayer' };
+
+    // ✅ Comparar en hora local, no en UTC
+    const iso = `${fecha.getFullYear()}-${String(fecha.getMonth()+1).padStart(2,'0')}-${String(fecha.getDate()).padStart(2,'0')}`;
+
+    if (iso === fechasValidas.hoy.iso)    return { valida: true, cual: 'hoy' };
+    if (iso === fechasValidas.ayer.iso)   return { valida: true, cual: 'ayer' };
+    if (iso === fechasValidas.antier.iso) return { valida: true, cual: 'ayer' }; // antier = también "ayer" para efectos del bot
     return { valida: false, cual: null };
 }
 
@@ -288,17 +330,55 @@ async function fetchHTML(url, headersExtra = {}, intentos = 3) {
 // SCRAPER — EXTRAER FECHA DE UN ARTÍCULO
 // ============================================================
 function extraerFecha($a) {
-    const candidatos = [
+    // PRIORIDAD 1: Metas ISO (más confiables)
+    const metaCandidatos = [
         $a('meta[property="article:published_time"]').attr('content'),
         $a('meta[name="date"]').attr('content'),
         $a('meta[name="publish-date"]').attr('content'),
         $a('meta[property="og:article:published_time"]').attr('content'),
-        $a('time[datetime]').attr('datetime'),
-        $a('time').first().text().trim(),
-        $a('.fecha, .post-date, .published, .entry-date, .date, .article-date, .timestamp').first().text().trim(),
-        $a('[class*="date"], [class*="fecha"], [class*="time"]').first().text().trim()
+        $a('meta[itemprop="datePublished"]').attr('content'),
     ];
-    return candidatos.find(f => f && f.trim().length > 3 && !f.includes('{')) || 'Fecha no encontrada';
+    for (const c of metaCandidatos) {
+        if (c && c.trim().length > 3) return c.trim();
+    }
+
+    // PRIORIDAD 2: <time datetime="..."> el atributo (no el texto visible)
+    const timeDt = $a('time[datetime]').attr('datetime');
+    if (timeDt && timeDt.trim().length > 3) return timeDt.trim();
+
+    // PRIORIDAD 3: Buscar "Hace X minutos/horas" en spans/divs pequeños
+    // Entérate León usa este patrón
+    let haceTexto = null;
+    $a('span, small, p').each((_, el) => {
+        if (haceTexto) return;
+        const t = $a(el).text().trim();
+        if (/^hace\s+\d+\s+(minuto|minutos|hora|horas|d.a|dias|dia)/i.test(t) && t.length < 50) {
+            haceTexto = t;
+        }
+    });
+    if (haceTexto) return haceTexto;
+
+    // PRIORIDAD 4: Texto de <time> si parece una fecha real
+    const timeText = $a('time').first().text().trim();
+    if (timeText && timeText.length > 3 && timeText.length < 80 &&
+        /\d/.test(timeText)) return timeText;
+
+    // PRIORIDAD 5: Clases de fecha — solo si parece una fecha, no una categoría mezclada
+    const clasesFecha = [
+        '.fecha', '.post-date', '.published', '.entry-date',
+        '.date', '.article-date', '.timestamp'
+    ];
+    for (const sel of clasesFecha) {
+        try {
+            const t = $a(sel).first().text().trim();
+            if (t && t.length > 3 && t.length < 80 &&
+                /(\d{4}|\d{1,2}[-\/]\d{1,2}|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|hace\s+\d)/i.test(t)) {
+                return t;
+            }
+        } catch(_) {}
+    }
+
+    return 'Fecha no encontrada';
 }
 
 // ============================================================
@@ -378,14 +458,118 @@ function extraerEnlaces($, sitio) {
 // ============================================================
 // SCRAPER — SCRAPING POR SITIO (ROBUSTO)
 // ============================================================
+// ============================================================
+// SCRAPER — RSS FEED (para sitios con Cloudflare como Zona Franca)
+// ============================================================
+async function scrapearRSS(sitio, fechasValidas) {
+    console.log(`Scrapeando RSS: ${sitio.nombre} → ${sitio.url}`);
+    const resultado = { sitio: sitio.nombre, noticias: [], sinNoticias: false, error: null };
+
+    const urlsIntentar = [sitio.url];
+    if (sitio.urlFallback) urlsIntentar.push(sitio.urlFallback);
+
+    let xmlData = null;
+    for (const rssUrl of urlsIntentar) {
+        try {
+            const resp = await axios.get(rssUrl, {
+                headers: {
+                    'User-Agent': getRandomUA(),
+                    'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+                },
+                timeout: 20000,
+                maxRedirects: 5,
+                validateStatus: s => s < 500
+            });
+            if (resp.status === 200 && resp.data && resp.data.length > 100) {
+                xmlData = resp.data;
+                console.log(`   RSS OK: ${rssUrl}`);
+                break;
+            } else {
+                console.log(`   RSS HTTP ${resp.status} en ${rssUrl}`);
+            }
+        } catch(e) {
+            console.log(`   RSS error en ${rssUrl}: ${e.message}`);
+        }
+    }
+
+    if (!xmlData) {
+        resultado.error = 'No se pudo acceder al RSS';
+        console.error(`ERROR RSS ${sitio.nombre}: sin datos`);
+        return resultado;
+    }
+
+    try {
+        const $ = cheerio.load(xmlData, { xmlMode: true });
+        const items = $('item');
+        console.log(`   ${items.length} items en RSS de ${sitio.nombre}`);
+
+        items.each((_, el) => {
+            if (resultado.noticias.length >= MAX_NOTICIAS_POR_SITIO) return;
+
+            const titular = $(el).find('title').first().text().trim();
+            const pubDate = $(el).find('pubDate').first().text().trim() ||
+                            $(el).find('dc\\:date, date').first().text().trim();
+            const desc    = $(el).find('description').first().text().trim();
+            const link    = $(el).find('link').first().text().trim();
+
+            if (!titular || titular.length < 5) return;
+
+            const fechaLimpia = pubDate || 'Fecha no encontrada';
+            const validacion  = esFechaValida(fechaLimpia, fechasValidas);
+
+            if (!validacion.valida) {
+                console.log(`   ⏭ RSS DESCARTADA (${fechaLimpia}): "${titular.slice(0,50)}"`);
+                return;
+            }
+
+            // Limpiar el description (viene con HTML en muchos RSS)
+            const descTexto = cheerio.load(desc).text().trim();
+            const resumenL  = cortarEnOracionCompleta(limpiarTexto(descTexto), MAX_CHARS_RESUMEN);
+
+            if (!resumenL || resumenL.length < 30) {
+                console.log(`   ⏭ RSS DESCARTADA (sin resumen): "${titular.slice(0,50)}"`);
+                return;
+            }
+
+            resultado.noticias.push({
+                fechaDetectada: validacion.cual,
+                fechaLegible:   formatearFechaLegible(fechaLimpia),
+                titular:        limpiarTexto(titular),
+                resumen:        resumenL
+            });
+            console.log(`   ✅ RSS ACEPTADA (${validacion.cual}): "${titular.slice(0, 55)}"`);
+        });
+
+        resultado.sinNoticias = resultado.noticias.length === 0;
+
+    } catch (err) {
+        resultado.error = err.message;
+        console.error(`ERROR parseando RSS ${sitio.nombre}: ${err.message}`);
+    }
+
+    return resultado;
+}
+
 async function scrapearSitio(sitio, fechasValidas) {
+    // ✅ Si el sitio usa RSS, delegar a scrapearRSS
+    if (sitio.tipo === 'rss') return scrapearRSS(sitio, fechasValidas);
+
     console.log(`Scrapeando: ${sitio.nombre} → ${sitio.url}`);
     const resultado = { sitio: sitio.nombre, noticias: [], sinNoticias: false, error: null };
 
     try {
-        const htmlPrincipal = await fetchHTML(sitio.url, sitio.headersExtra || {});
-        const $ = cheerio.load(htmlPrincipal);
-        const enlaces = extraerEnlaces($, sitio);
+        // ✅ Intentar URL principal, con fallback si no hay enlaces
+        let htmlPrincipal = await fetchHTML(sitio.url, sitio.headersExtra || {});
+        let $ = cheerio.load(htmlPrincipal);
+        let enlaces = extraerEnlaces($, sitio);
+
+        // Si no encontró enlaces y hay URL de fallback, intentar con esa
+        if (enlaces.length === 0 && sitio.urlFallback) {
+            console.log(`   Sin enlaces en URL principal, intentando fallback: ${sitio.urlFallback}`);
+            htmlPrincipal = await fetchHTML(sitio.urlFallback, sitio.headersExtra || {});
+            $ = cheerio.load(htmlPrincipal);
+            enlaces = extraerEnlaces($, sitio);
+        }
 
         console.log(`   ${enlaces.length} enlaces encontrados en ${sitio.nombre}`);
 
@@ -427,8 +611,8 @@ async function scrapearSitio(sitio, fechasValidas) {
                 } else {
                     console.log(`   ⏭ DESCARTADA - Fecha: "${fecha}"`);
                     const fp = parsearFechaTexto(fecha);
-                    // Si la noticia tiene más de 3 días, dejar de buscar en este sitio
-                    if (fp && (new Date() - fp) / 86400000 > 3) {
+                    // Si la noticia tiene más de 5 días, dejar de buscar en este sitio
+                    if (fp && (new Date() - fp) / 86400000 > 5) {
                         console.log(`   Noticias demasiado antiguas en ${sitio.nombre}, deteniendo.`);
                         break;
                     }
