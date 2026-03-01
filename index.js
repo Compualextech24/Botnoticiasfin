@@ -54,11 +54,12 @@ http.createServer(async (req, res) => {
             <script>setTimeout(() => location.reload(), 20000);</script>
         </body></html>`);
     } else {
+        // ✅ Respuesta clara para UptimeRobot (busca status 200)
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("Bot Online");
     }
 }).listen(PORT, () => {
-    console.log(`Servidor HTTP en puerto ${PORT}`);
+    console.log(`Servidor HTTP en puerto ${PORT} - UptimeRobot puede monitorear /`);
 
     // Auto-ping cada 10 min para que Render no duerma el servicio
     const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -89,6 +90,10 @@ let lastNewsSentKey  = null;
 let newsInProgress   = false;
 let newsScheduled    = false;
 let keepAliveStarted = false;
+
+// ✅ Referencia global al socket para reintentos
+let globalSock = null;
+let isConnected = false;
 
 setInterval(() => {
     if (firstTimeUsers.size > MAX_CACHE_SIZE)  { firstTimeUsers.clear();    console.log("Cache usuarios limpiado"); }
@@ -335,48 +340,112 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
-// ENVIAR NOTICIAS
+// ✅ ENVIAR NOTICIAS — CON REINTENTOS Y VALIDACIÓN DE CONEXIÓN
 // ============================================================
 async function sendDailyNews(sock, isManual = false) {
-    if (newsInProgress) { console.log("Scraper ya en ejecucion, ignorando."); return false; }
+    // ✅ Validar que la conexión esté activa antes de intentar enviar
+    if (!isConnected) {
+        console.log("Bot no conectado, no se pueden enviar noticias.");
+        return false;
+    }
+
+    if (newsInProgress) {
+        console.log("Scraper ya en ejecucion, ignorando.");
+        return false;
+    }
+
     newsInProgress = true;
     const label = isManual ? ' (Manual)' : '';
     console.log(`Enviando noticias${label}...`);
 
-    try {
-        await sock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
-        const { resultados, fechasValidas } = await ejecutarScraper();
-        const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
-        for (const msg of mensajes) { await sock.sendMessage(NEWS_GROUP_ID, { text: msg }); await sleep(1500); }
-        const total = resultados.reduce((a, r) => a + (r.noticias?.length || 0), 0);
-        console.log(`NOTICIAS ENVIADAS${label} - ${total} noticias`);
-        return true;
-    } catch (err) {
-        console.error(`ERROR AL ENVIAR: ${err.message}`);
-        try { await sock.sendMessage(NEWS_GROUP_ID, { text: "\u26A0\uFE0F Error al obtener noticias. Se reintentara en el siguiente horario." }); } catch {}
-        return false;
-    } finally {
-        newsInProgress = false;
+    const MAX_REINTENTOS = 3;
+
+    for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
+        try {
+            // ✅ Verificar conexión antes de cada intento
+            if (!isConnected) {
+                console.log(`Intento ${intento}: Bot desconectado, esperando 10s...`);
+                await sleep(10000);
+                if (!isConnected) {
+                    console.log(`Intento ${intento}: Sigue desconectado, saltando.`);
+                    continue;
+                }
+            }
+
+            await sock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
+            const { resultados, fechasValidas } = await ejecutarScraper();
+            const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
+
+            for (const msg of mensajes) {
+                await sock.sendMessage(NEWS_GROUP_ID, { text: msg });
+                await sleep(1500);
+            }
+
+            const total = resultados.reduce((a, r) => a + (r.noticias?.length || 0), 0);
+            console.log(`NOTICIAS ENVIADAS${label} - ${total} noticias (intento ${intento})`);
+            newsInProgress = false;
+            return true;
+
+        } catch (err) {
+            console.error(`ERROR AL ENVIAR (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
+
+            if (intento < MAX_REINTENTOS) {
+                const espera = intento * 15000; // 15s, 30s
+                console.log(`Reintentando en ${espera / 1000}s...`);
+                await sleep(espera);
+            } else {
+                // Último intento fallido: notificar en el grupo
+                console.error(`Todos los reintentos fallaron.`);
+                try {
+                    if (isConnected) {
+                        await sock.sendMessage(NEWS_GROUP_ID, {
+                            text: "\u26A0\uFE0F Error al obtener noticias. Se reintentara en el siguiente horario."
+                        });
+                    }
+                } catch (e2) {
+                    console.error(`No se pudo enviar mensaje de error: ${e2.message}`);
+                }
+            }
+        }
     }
+
+    newsInProgress = false;
+    return false;
 }
 
 // ============================================================
-// PROGRAMAR NOTICIAS
+// ✅ PROGRAMAR NOTICIAS — SCHEDULER ROBUSTO CON VENTANA DE 2 MIN
 // ============================================================
 function scheduleNews(sock) {
     if (newsScheduled) return;
     newsScheduled = true;
+
     console.log("Horarios programados:");
     NEWS_SCHEDULE.forEach(s => console.log(`   ${String(s.hour).padStart(2,'0')}:${String(s.minute).padStart(2,'0')}`));
 
+    // ✅ Corre cada 15s (en lugar de 30s) para no perder la ventana del minuto
     setInterval(() => {
+        if (!isConnected) return; // No intentar si está desconectado
+
         const now     = new Date();
-        const timeKey = `${now.toDateString()}-${now.getHours()}:${now.getMinutes()}`;
-        if (NEWS_SCHEDULE.some(s => s.hour === now.getHours() && s.minute === now.getMinutes()) && lastNewsSentKey !== timeKey) {
+        const h       = now.getHours();
+        const min     = now.getMinutes();
+
+        // ✅ Ventana de 2 minutos: dispara si estamos en el minuto exacto o 1 min después
+        const esMomento = NEWS_SCHEDULE.some(s =>
+            s.hour === h && (s.minute === min || s.minute === min - 1)
+        );
+
+        const timeKey = `${now.toDateString()}-${h}:${NEWS_SCHEDULE.find(s =>
+            s.hour === h && (s.minute === min || s.minute === min - 1)
+        )?.minute ?? min}`;
+
+        if (esMomento && lastNewsSentKey !== timeKey) {
             lastNewsSentKey = timeKey;
+            console.log(`Disparando noticias programadas - ${h}:${String(min).padStart(2,'0')}`);
             sendDailyNews(sock);
         }
-    }, 30000);
+    }, 15000); // cada 15 segundos
 }
 
 // ============================================================
@@ -396,7 +465,7 @@ async function connectToWhatsApp() {
         generateHighQualityLinkPreview: false,
         getMessage: async () => undefined,
         defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs:   30000,
+        keepAliveIntervalMs:   25000, // ✅ Reducido a 25s para más estabilidad
         connectTimeoutMs:      60000,
         emitOwnEvents:         false,
         fireInitQueries:       true,
@@ -404,9 +473,17 @@ async function connectToWhatsApp() {
         retryRequestDelayMs:   250
     });
 
+    // ✅ Guardar referencia global
+    globalSock = sock;
+
+    // ✅ Keep-alive más agresivo: presencia + ping
     if (!keepAliveStarted) {
         keepAliveStarted = true;
-        setInterval(() => { if (sock?.user) sock.sendPresenceUpdate('available').catch(() => {}); }, 50000);
+        setInterval(() => {
+            if (sock?.user && isConnected) {
+                sock.sendPresenceUpdate('available').catch(() => {});
+            }
+        }, 30000); // cada 30s
     }
 
     sock.ev.on("connection.update", (update) => {
@@ -414,19 +491,23 @@ async function connectToWhatsApp() {
 
         if (qr) {
             latestQr = qr;
+            isConnected = false;
             qrcodeTerminal.generate(qr, { small: true });
             console.log("QR listo - escanea en /qr");
         }
 
         if (connection === "open") {
+            isConnected = true; // ✅ Marcar como conectado
+            latestQr = null;
             console.log("BOT CONECTADO Y OPERATIVO");
             scheduleNews(sock);
         }
 
         if (connection === "close") {
+            isConnected = false; // ✅ Marcar como desconectado
             const code = lastDisconnect?.error?.output?.statusCode;
 
-            // ⭐ CLAVE: 401=sesion invalida, 440=reemplazada, 428=forzada — NO reconectar
+            // 401=sesion invalida, 440=reemplazada, 428=forzada — NO reconectar
             const shouldReconnect = code !== 401 && code !== 440 && code !== 428;
 
             console.log(`Conexion cerrada (codigo: ${code ?? 'desconocido'}) - ${shouldReconnect ? 'reconectando en 5s' : 'STOP definitivo'}`);
