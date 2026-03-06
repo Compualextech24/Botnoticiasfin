@@ -84,7 +84,7 @@ const NEWS_SCHEDULE  = [
 ];
 
 const RETENES_GROUP_ID = "120363415871374454@g.us";
-const PROMO_SCHEDULE   = { hour: 16, minute: 40 }; // ← hora en México (no UTC)
+const PROMO_SCHEDULE   = { hour: 17, minute: 05 };
 
 let lastNewsSentKey  = null;
 let lastPromoSentKey = null;
@@ -95,7 +95,6 @@ let keepAliveStarted = false;
 let globalSock       = null;
 let isConnected      = false;
 
-// Resetear flags colgados cada 5 minutos
 setInterval(() => {
     if (promoInProgress) { console.log("⚠️ promoInProgress colgado — reseteando."); promoInProgress = false; }
     if (newsInProgress)  { console.log("⚠️ newsInProgress colgado — reseteando.");  newsInProgress  = false; }
@@ -107,27 +106,41 @@ setInterval(() => {
 }, 3600000);
 
 // ============================================================
-// ✅ HELPER — HORA ACTUAL EN MÉXICO (corrige el bug de UTC en Render)
-// Render corre en UTC. getHours() devuelve hora UTC, no México.
-// Esta función devuelve { h, min, dateStr } siempre en zona México.
+// HELPER — HORA ACTUAL EN MÉXICO
 // ============================================================
 function horaEnMexico() {
     const tz  = process.env.TZ || 'America/Mexico_City';
     const now = new Date();
-
-    // toLocaleString en México nos da "DD/MM/YYYY, HH:MM:SS"
     const str = now.toLocaleString('es-MX', {
         timeZone: tz,
         hour: '2-digit', minute: '2-digit',
         hour12: false
-    }); // "16:20"
-
+    });
     const [h, min] = str.split(':').map(Number);
-
-    // Fecha en México para usar como clave del día
-    const dateStr = now.toLocaleDateString('es-MX', { timeZone: tz }); // "06/03/2026"
-
+    const dateStr = now.toLocaleDateString('es-MX', { timeZone: tz });
     return { h, min, dateStr };
+}
+
+// ============================================================
+// HELPER — ESPERAR RECONEXIÓN
+// ✅ FIX EPIPE: en lugar de sleep fijo, espera activamente
+//    hasta que isConnected sea true otra vez (máx 60s)
+// ============================================================
+async function esperarConexion(label = '') {
+    if (isConnected) return true;
+    console.log(`${label} Esperando reconexión...`);
+    let espera = 0;
+    while (!isConnected && espera < 60000) {
+        await sleep(2000);
+        espera += 2000;
+    }
+    if (!isConnected) {
+        console.log(`${label} No reconectó en 60s, abortando.`);
+        return false;
+    }
+    // Pausa extra para que el socket quede estable
+    await sleep(3000);
+    return true;
 }
 
 // ============================================================
@@ -471,10 +484,7 @@ async function scrapearRSS(sitio, fechasValidas) {
     for (const rssUrl of urlsRSS) {
         try {
             const resp = await axios.get(rssUrl, {
-                headers: {
-                    'User-Agent': getRandomUA(),
-                    'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-                },
+                headers: { 'User-Agent': getRandomUA(), 'Accept': 'application/rss+xml, application/xml, text/xml, */*' },
                 timeout: 20000,
                 maxRedirects: 5,
                 validateStatus: s => s < 500
@@ -494,8 +504,7 @@ async function scrapearRSS(sitio, fechasValidas) {
     if (!xmlData) {
         if (sitio.urlFallback && !sitio.urlFallback.includes('feed')) {
             console.log(`   RSS sin datos, usando fallback HTML: ${sitio.urlFallback}`);
-            const sitioFallback = { ...sitio, url: sitio.urlFallback, tipo: 'wordpress' };
-            return scrapearSitioHTML(sitioFallback, fechasValidas);
+            return scrapearSitioHTML({ ...sitio, url: sitio.urlFallback, tipo: 'wordpress' }, fechasValidas);
         }
         resultado.error = 'No se pudo acceder al RSS';
         console.error(`ERROR RSS ${sitio.nombre}: sin datos`);
@@ -716,6 +725,7 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 
 // ============================================================
 // ENVIAR PROMO — Retenes León GTO
+// ✅ FIX EPIPE: usa esperarConexion() en lugar de sleep fijo
 // ============================================================
 async function sendPromoMessage() {
     if (!isConnected) { console.log("Bot no conectado, omitiendo promo."); return false; }
@@ -737,18 +747,18 @@ Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
 
     try {
         for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
+            if (!isConnected) {
+                const reconecto = await esperarConexion(`[Promo intento ${intento}]`);
+                if (!reconecto) continue;
+            }
             try {
-                if (!isConnected) {
-                    await sleep(10000);
-                    if (!isConnected) { console.log(`Promo intento ${intento}: sigue desconectado.`); continue; }
-                }
                 await globalSock.sendMessage(RETENES_GROUP_ID, { text: msg });
                 console.log(`✅ Promo enviada a Retenes León GTO (intento ${intento})`);
                 return true;
             } catch (err) {
                 console.error(`ERROR promo (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
-                if (intento < MAX_REINTENTOS) await sleep(intento * 15000);
-                else console.error(`Todos los reintentos de promo fallaron.`);
+                isConnected = false; // forzar espera de reconexión en siguiente intento
+                if (intento === MAX_REINTENTOS) console.error(`Todos los reintentos de promo fallaron.`);
             }
         }
         return false;
@@ -759,6 +769,7 @@ Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
 
 // ============================================================
 // ENVIAR NOTICIAS
+// ✅ FIX EPIPE: usa esperarConexion() en lugar de sleep fijo
 // ============================================================
 async function sendDailyNews(isManual = false) {
     if (!isConnected) { console.log("Bot no conectado, omitiendo envío."); return false; }
@@ -771,12 +782,11 @@ async function sendDailyNews(isManual = false) {
     try {
         const MAX_REINTENTOS = 3;
         for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
+            if (!isConnected) {
+                const reconecto = await esperarConexion(`[Noticias intento ${intento}]`);
+                if (!reconecto) continue;
+            }
             try {
-                if (!isConnected) {
-                    await sleep(10000);
-                    if (!isConnected) { console.log(`Intento ${intento}: sigue desconectado.`); continue; }
-                }
-
                 await globalSock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
                 const { resultados, fechasValidas, totalNoticias } = await ejecutarScraper();
                 const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
@@ -791,12 +801,8 @@ async function sendDailyNews(isManual = false) {
 
             } catch (err) {
                 console.error(`ERROR AL ENVIAR (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
-                if (intento < MAX_REINTENTOS) {
-                    console.log(`Reintentando en ${intento * 15}s...`);
-                    await sleep(intento * 15000);
-                } else {
-                    console.error(`Todos los reintentos fallaron.`);
-                }
+                isConnected = false; // forzar espera de reconexión en siguiente intento
+                if (intento === MAX_REINTENTOS) console.error(`Todos los reintentos fallaron.`);
             }
         }
         return false;
@@ -807,8 +813,6 @@ async function sendDailyNews(isManual = false) {
 
 // ============================================================
 // SCHEDULER
-// ✅ FIX PRINCIPAL: usa horaEnMexico() para comparar horas
-//    en lugar de new Date().getHours() que devuelve UTC en Render
 // ============================================================
 function scheduleNews() {
     if (newsScheduled) return;
@@ -823,7 +827,6 @@ function scheduleNews() {
     setInterval(() => {
         if (!isConnected) return;
 
-        // ✅ Hora y minuto en México — no en UTC del servidor
         const { h, min, dateStr } = horaEnMexico();
 
         // ── Noticias ──
@@ -1000,7 +1003,6 @@ async function connectToWhatsApp() {
 
         const text = extraerTextoMensaje(m);
 
-        // ── GRUPO DE NOTICIAS ──
         if (remoteJid === NEWS_GROUP_ID) {
             if (text.toLowerCase() === "@sendinstructionsnotice") {
                 console.log("Comando manual recibido: enviando noticias...");
@@ -1009,20 +1011,15 @@ async function connectToWhatsApp() {
             return;
         }
 
-        // ── IGNORAR OTROS GRUPOS ──
         if (esGrupo) return;
-
-        // ── IGNORAR MENSAJES PROPIOS ──
         if (esMio) return;
 
-        // ── COMANDO /saludo ──
         if (text.toLowerCase() === '/saludo') {
             console.log(`Comando /saludo activado para: ${remoteJid.split('@')[0]}`);
             await enviarSaludo(sock, remoteJid);
             return;
         }
 
-        // ── BIENVENIDA AUTOMÁTICA ──
         if (!firstTimeUsers.has(remoteJid)) {
             firstTimeUsers.add(remoteJid);
             console.log(`Nuevo usuario, enviando bienvenida: ${remoteJid.split('@')[0]}`);
