@@ -80,13 +80,13 @@ const firstTimeUsers    = new Set();
 const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
-    { hour: 14, minute: 30 },
-    { hour: 22, minute: 00 }
+    { hour: 7, minute: 30 },  // ← INDICADOR DE HORA
+    { hour: 22, minute: 00 }   // ← INDICADOR DE HORA
 ];
 
 // ── Promo Retenes ──
 const RETENES_GROUP_ID = "120363415871374454@g.us";
-const PROMO_SCHEDULE   = { hour: 15, minute: 00 };
+const PROMO_SCHEDULE   = { hour: 14, minute: 55 };  // ← INDICADOR DE HORA
 
 let lastNewsSentKey  = null;
 let lastPromoSentKey = null; // ← variable independiente para no interferir con noticias
@@ -1012,3 +1012,4 @@ async function connectToWhatsApp() {
 console.log("Iniciando Ghost Bot...");
 console.log(`Zona horaria: ${process.env.TZ || 'America/Mexico_City'}`);
 connectToWhatsApp();
+
