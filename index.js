@@ -81,7 +81,7 @@ const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
     { hour: 22, minute: 30 },
-    { hour: 21, minute: 55 }
+    { hour: 1, minute: 40 }
 ];
 
 let lastNewsSentKey  = null;
@@ -99,8 +99,6 @@ setInterval(() => {
 // ============================================================
 // SCRAPER — CONFIGURACIÓN
 // ============================================================
-
-// ✅ NUEVO: 3 sitios. Zona Franca con config especial para bypassear bloqueos.
 const SITIOS = [
     {
         nombre:   'UM Noticias',
@@ -110,8 +108,6 @@ const SITIOS = [
     },
     {
         nombre:   'Zona Franca',
-        // ✅ Usar RSS feed para evitar el bloqueo HTTP 403 de Cloudflare
-        // El RSS es XML público y generalmente no está protegido por Cloudflare
         url:      'https://zonafranca.mx/feed/',
         urlFallback: 'https://zonafranca.mx/category/local/feed/',
         dominio:  'zonafranca.mx',
@@ -119,7 +115,6 @@ const SITIOS = [
     },
     {
         nombre:   'Entérate León',
-        // ✅ Probar primero la sección de comunicados (más activa y con fechas limpias)
         url:          'https://enterate.leon.gob.mx/?cat=comunicados',
         urlFallback:  'https://enterate.leon.gob.mx/',
         dominio:      'enterate.leon.gob.mx',
@@ -139,10 +134,9 @@ const SITIOS = [
 ];
 
 const MAX_NOTICIAS_POR_SITIO = 2;
-const META_NOTICIAS_TOTAL    = 2;  // ✅ Mínimo que queremos enviar en total
+const META_NOTICIAS_TOTAL    = 2;
 const MAX_CHARS_RESUMEN      = 900;
 
-// ✅ Pool de User-Agents para rotar y evitar bloqueos
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -169,17 +163,15 @@ function getBaseHeaders(extra = {}) {
 }
 
 // ============================================================
-// SCRAPER — FECHAS (con soporte para fechas relativas y UTC)
+// SCRAPER — FECHAS
 // ============================================================
 function getFechasValidas() {
-    // ✅ Usar hora local México, no UTC
     const ahora = new Date();
     const tz    = process.env.TZ || 'America/Mexico_City';
 
-    // Fecha de hoy en México
     const hoyStr = ahora.toLocaleDateString('es-MX', {
         timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'
-    }); // "DD/MM/YYYY"
+    });
     const [hd, hm, hy] = hoyStr.split('/');
     const hoy = new Date(+hy, +hm - 1, +hd);
 
@@ -207,7 +199,6 @@ function parsearFechaTexto(textoFecha) {
     };
     let m;
 
-    // ✅ FIX: Fechas relativas "Hace X minutos/horas/días" (Entérate León y similares)
     m = texto.match(/hace\s+(\d+)\s+(minuto|minutos|hora|horas|día|dias|dia)/);
     if (m) {
         const n = parseInt(m[1]);
@@ -219,18 +210,15 @@ function parsearFechaTexto(textoFecha) {
         return ahora;
     }
 
-    // "Hace X semanas" = probablemente viejo
     if (texto.match(/hace\s+\d+\s+(semana|semanas|mes|meses|año|años)/)) {
-        return new Date(2000, 0, 1); // fecha muy antigua para que se descarte
+        return new Date(2000, 0, 1);
     }
 
-    // ISO: 2026-03-01 o 2026-03-01T10:45:00+00:00
     m = texto.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
     if (m) {
-        // ✅ FIX UTC→México: si el ISO tiene hora, ajustar a zona local
         if (textoFecha.includes('T') || textoFecha.includes('+') || textoFecha.endsWith('Z')) {
             const d = new Date(textoFecha);
-            if (!isNaN(d.getTime())) return d; // JS convierte UTC→local automáticamente
+            if (!isNaN(d.getTime())) return d;
         }
         return new Date(+m[1], +m[2]-1, +m[3]);
     }
@@ -253,12 +241,11 @@ function esFechaValida(textoFecha, fechasValidas) {
     const fecha = parsearFechaTexto(textoFecha);
     if (!fecha) return { valida: false, cual: null };
 
-    // ✅ Comparar en hora local, no en UTC
     const iso = `${fecha.getFullYear()}-${String(fecha.getMonth()+1).padStart(2,'0')}-${String(fecha.getDate()).padStart(2,'0')}`;
 
     if (iso === fechasValidas.hoy.iso)    return { valida: true, cual: 'hoy' };
     if (iso === fechasValidas.ayer.iso)   return { valida: true, cual: 'ayer' };
-    if (iso === fechasValidas.antier.iso) return { valida: true, cual: 'ayer' }; // antier = también "ayer" para efectos del bot
+    if (iso === fechasValidas.antier.iso) return { valida: true, cual: 'ayer' };
     return { valida: false, cual: null };
 }
 
@@ -294,7 +281,7 @@ function limpiarTexto(texto) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ============================================================
-// SCRAPER — FETCH CON REINTENTOS Y ROTACIÓN DE UA
+// SCRAPER — FETCH CON REINTENTOS
 // ============================================================
 async function fetchHTML(url, headersExtra = {}, intentos = 3) {
     let ultimoError;
@@ -304,11 +291,9 @@ async function fetchHTML(url, headersExtra = {}, intentos = 3) {
                 headers: getBaseHeaders(headersExtra),
                 timeout: 25000,
                 maxRedirects: 8,
-                // ✅ Importante: aceptar respuestas aunque el status sea 4xx para ver qué devuelve
                 validateStatus: (s) => s < 500
             });
 
-            // Si es 403/429 (bloqueado), loguear y reintentar con espera
             if (resp.status === 403 || resp.status === 429) {
                 console.log(`   fetchHTML ${url} -> HTTP ${resp.status}, reintento ${i}/${intentos}`);
                 await sleep(3000 * i);
@@ -330,7 +315,6 @@ async function fetchHTML(url, headersExtra = {}, intentos = 3) {
 // SCRAPER — EXTRAER FECHA DE UN ARTÍCULO
 // ============================================================
 function extraerFecha($a) {
-    // PRIORIDAD 1: Metas ISO (más confiables)
     const metaCandidatos = [
         $a('meta[property="article:published_time"]').attr('content'),
         $a('meta[name="date"]').attr('content'),
@@ -342,12 +326,9 @@ function extraerFecha($a) {
         if (c && c.trim().length > 3) return c.trim();
     }
 
-    // PRIORIDAD 2: <time datetime="..."> el atributo (no el texto visible)
     const timeDt = $a('time[datetime]').attr('datetime');
     if (timeDt && timeDt.trim().length > 3) return timeDt.trim();
 
-    // PRIORIDAD 3: Buscar "Hace X minutos/horas" en spans/divs pequeños
-    // Entérate León usa este patrón
     let haceTexto = null;
     $a('span, small, p').each((_, el) => {
         if (haceTexto) return;
@@ -358,12 +339,10 @@ function extraerFecha($a) {
     });
     if (haceTexto) return haceTexto;
 
-    // PRIORIDAD 4: Texto de <time> si parece una fecha real
     const timeText = $a('time').first().text().trim();
     if (timeText && timeText.length > 3 && timeText.length < 80 &&
         /\d/.test(timeText)) return timeText;
 
-    // PRIORIDAD 5: Clases de fecha — solo si parece una fecha, no una categoría mezclada
     const clasesFecha = [
         '.fecha', '.post-date', '.published', '.entry-date',
         '.date', '.article-date', '.timestamp'
@@ -439,7 +418,6 @@ function extraerEnlaces($, sitio) {
         });
     }
 
-    // Fallback para sitios sin selectores específicos: buscar todos los <a>
     if (enlaces.length === 0) {
         $('a[href]').each((_, el) => {
             const href = $(el).attr('href') || '';
@@ -456,10 +434,7 @@ function extraerEnlaces($, sitio) {
 }
 
 // ============================================================
-// SCRAPER — SCRAPING POR SITIO (ROBUSTO)
-// ============================================================
-// ============================================================
-// SCRAPER — RSS FEED (para sitios con Cloudflare como Zona Franca)
+// SCRAPER — RSS FEED
 // ============================================================
 async function scrapearRSS(sitio, fechasValidas) {
     console.log(`Scrapeando RSS: ${sitio.nombre} → ${sitio.url}`);
@@ -522,7 +497,6 @@ async function scrapearRSS(sitio, fechasValidas) {
                 return;
             }
 
-            // Limpiar el description (viene con HTML en muchos RSS)
             const descTexto = cheerio.load(desc).text().trim();
             const resumenL  = cortarEnOracionCompleta(limpiarTexto(descTexto), MAX_CHARS_RESUMEN);
 
@@ -550,20 +524,20 @@ async function scrapearRSS(sitio, fechasValidas) {
     return resultado;
 }
 
+// ============================================================
+// SCRAPER — SCRAPING POR SITIO
+// ============================================================
 async function scrapearSitio(sitio, fechasValidas) {
-    // ✅ Si el sitio usa RSS, delegar a scrapearRSS
     if (sitio.tipo === 'rss') return scrapearRSS(sitio, fechasValidas);
 
     console.log(`Scrapeando: ${sitio.nombre} → ${sitio.url}`);
     const resultado = { sitio: sitio.nombre, noticias: [], sinNoticias: false, error: null };
 
     try {
-        // ✅ Intentar URL principal, con fallback si no hay enlaces
         let htmlPrincipal = await fetchHTML(sitio.url, sitio.headersExtra || {});
         let $ = cheerio.load(htmlPrincipal);
         let enlaces = extraerEnlaces($, sitio);
 
-        // Si no encontró enlaces y hay URL de fallback, intentar con esa
         if (enlaces.length === 0 && sitio.urlFallback) {
             console.log(`   Sin enlaces en URL principal, intentando fallback: ${sitio.urlFallback}`);
             htmlPrincipal = await fetchHTML(sitio.urlFallback, sitio.headersExtra || {});
@@ -596,7 +570,6 @@ async function scrapearSitio(sitio, fechasValidas) {
                 const validacion = esFechaValida(fecha, fechasValidas);
 
                 if (validacion.valida) {
-                    // ✅ Solo aceptar si hay resumen con contenido real
                     if (!resumenL || resumenL.length < 50) {
                         console.log(`   DESCARTADA (sin resumen): "${titularL.slice(0, 55)}"`);
                     } else {
@@ -611,7 +584,6 @@ async function scrapearSitio(sitio, fechasValidas) {
                 } else {
                     console.log(`   ⏭ DESCARTADA - Fecha: "${fecha}"`);
                     const fp = parsearFechaTexto(fecha);
-                    // Si la noticia tiene más de 5 días, dejar de buscar en este sitio
                     if (fp && (new Date() - fp) / 86400000 > 5) {
                         console.log(`   Noticias demasiado antiguas en ${sitio.nombre}, deteniendo.`);
                         break;
@@ -634,7 +606,6 @@ async function scrapearSitio(sitio, fechasValidas) {
         }
 
     } catch (err) {
-        // ✅ El error se registra SOLO en logs, NUNCA se expone en el grupo
         resultado.error = err.message;
         console.error(`ERROR scraping ${sitio.nombre}: ${err.message}`);
     }
@@ -643,7 +614,7 @@ async function scrapearSitio(sitio, fechasValidas) {
 }
 
 // ============================================================
-// SCRAPER — EJECUTAR TODOS LOS SITIOS CON FALLBACK
+// SCRAPER — EJECUTAR TODOS LOS SITIOS
 // ============================================================
 async function ejecutarScraper() {
     const fechasValidas = getFechasValidas();
@@ -652,11 +623,9 @@ async function ejecutarScraper() {
     const resultados = [];
     for (const sitio of SITIOS) {
         resultados.push(await scrapearSitio(sitio, fechasValidas));
-        // Pequeña pausa entre sitios para no generar patrones sospechosos
         await sleep(1500);
     }
 
-    // ✅ Conteo global de noticias obtenidas
     const totalNoticias = resultados.reduce((acc, r) => acc + (r.noticias?.length || 0), 0);
     console.log(`Scraper terminado — Total noticias válidas: ${totalNoticias}`);
 
@@ -664,7 +633,7 @@ async function ejecutarScraper() {
 }
 
 // ============================================================
-// FORMATEAR PARA WHATSAPP — SIN REVELAR FUENTES CON ERRORES
+// FORMATEAR PARA WHATSAPP
 // ============================================================
 function formatearParaWhatsApp(resultados, fechasValidas) {
     const SEP = '━'.repeat(30);
@@ -672,7 +641,6 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
     let noticiaGlobal = 1;
     let hayNoticias   = false;
 
-    // Header principal
     mensajes.push(
         `📡 *NOTICIAS LOCALES*\n` +
         `📍 León, Guanajuato\n` +
@@ -681,8 +649,6 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
     );
 
     for (const r of resultados) {
-        // ✅ CAMBIO CLAVE: Si hay error o no hay noticias, NO se menciona al grupo
-        // Solo se registra internamente en consola (ya ocurrió arriba en scrapearSitio)
         if (r.error || r.sinNoticias || !r.noticias?.length) continue;
 
         for (const n of r.noticias) {
@@ -699,7 +665,6 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
         }
     }
 
-    // ✅ Si no hay NINGUNA noticia de ningún sitio, mensaje genérico y discreto
     if (!hayNoticias) {
         mensajes.push(
             `📋 *Sin novedades destacadas por el momento.*\n` +
@@ -708,7 +673,6 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
         return mensajes;
     }
 
-    // Footer con canal solo si hay noticias
     mensajes.push(
         `${SEP}\n` +
         `📲 Más información:\n` +
@@ -719,7 +683,7 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
-// ENVIAR NOTICIAS — CON REINTENTOS Y VALIDACIÓN DE CONEXIÓN
+// ENVIAR NOTICIAS — CON REINTENTOS
 // ============================================================
 async function sendDailyNews(sock, isManual = false) {
     if (!isConnected) {
@@ -766,7 +730,6 @@ async function sendDailyNews(sock, isManual = false) {
                 await sleep(espera);
             } else {
                 console.error(`Todos los reintentos fallaron. No se envió nada al grupo.`);
-                // ✅ NO enviamos mensaje de error al grupo para no revelar el sistema
             }
         }
     }
@@ -776,7 +739,8 @@ async function sendDailyNews(sock, isManual = false) {
 }
 
 // ============================================================
-// PROGRAMAR NOTICIAS — SCHEDULER CON VENTANA DE 2 MIN
+// PROGRAMAR NOTICIAS — SCHEDULER
+// ✅ FIX: Usa globalSock en lugar del sock capturado al inicio
 // ============================================================
 function scheduleNews(sock) {
     if (newsScheduled) return;
@@ -804,7 +768,9 @@ function scheduleNews(sock) {
         if (lastNewsSentKey !== timeKey) {
             lastNewsSentKey = timeKey;
             console.log(`⏰ Disparando noticias — ${h}:${String(min).padStart(2,'0')}`);
-            sendDailyNews(sock);
+            // ✅ FIX PRINCIPAL: Siempre usar globalSock (el socket activo actual)
+            // El sock original puede estar muerto si hubo reconexiones
+            sendDailyNews(globalSock);
         }
     }, 15000);
 }
@@ -836,11 +802,18 @@ async function connectToWhatsApp() {
 
     globalSock = sock;
 
+    // ✅ FIX: keepAlive detecta desconexiones silenciosas de WhatsApp
+    // Antes usaba .catch(() => {}) que tragaba los errores sin avisar
     if (!keepAliveStarted) {
         keepAliveStarted = true;
-        setInterval(() => {
-            if (sock?.user && isConnected) {
-                sock.sendPresenceUpdate('available').catch(() => {});
+        setInterval(async () => {
+            if (globalSock?.user && isConnected) {
+                try {
+                    await globalSock.sendPresenceUpdate('available');
+                } catch (e) {
+                    console.log(`KeepAlive WA falló: ${e.message} — marcando desconectado`);
+                    isConnected = false;
+                }
             }
         }, 30000);
     }
@@ -902,6 +875,28 @@ async function connectToWhatsApp() {
 
         if (remoteJid.endsWith("@g.us")) return;
 
+        // ✅ NUEVO: Comando /saludo — reenvía bienvenida en cualquier momento
+        if (text.toLowerCase() === '/saludo') {
+            const imagePath   = './Imagenes2/Ghostcmd.png';
+            const audioPath   = './Vozcomandante.ogg';
+            const welcomeText = "Saludos hermano¡ en estos momentos quizá me encuentro ocupado pero este es mi asistente digital, dime en que te puedo ayudar?";
+            try {
+                if (fs.existsSync(imagePath)) {
+                    await sock.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption: welcomeText });
+                } else {
+                    await sock.sendMessage(remoteJid, { text: welcomeText });
+                }
+                await sleep(1000);
+                if (fs.existsSync(audioPath)) {
+                    await sock.sendMessage(remoteJid, { audio: fs.readFileSync(audioPath), mimetype: 'audio/ogg; codecs=opus', ptt: true });
+                }
+                console.log(`Saludo manual enviado a: ${remoteJid.split('@')[0]}`);
+            } catch (e) {
+                console.log(`Error saludo manual: ${e.message}`);
+            }
+            return;
+        }
+
         if (!firstTimeUsers.has(remoteJid)) {
             firstTimeUsers.add(remoteJid);
             const imagePath   = './Imagenes2/Ghostcmd.png';
@@ -932,4 +927,3 @@ async function connectToWhatsApp() {
 console.log("Iniciando Ghost Bot...");
 console.log(`Zona horaria: ${process.env.TZ || 'America/Mexico_City'}`);
 connectToWhatsApp();
-
