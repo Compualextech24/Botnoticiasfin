@@ -62,12 +62,12 @@ http.createServer(async (req, res) => {
 
     const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
     setInterval(async () => {
-        try {
-            await axios.get(RENDER_URL, { timeout: 8000 });
-            console.log(`Auto-ping OK`);
-        } catch (e) {
-            console.log(`Auto-ping fallo: ${e.message}`);
-        }
+      try {
+    await axios.get(RENDER_URL, { timeout: 8000 });
+    // Auto-ping silencioso — sin log en éxito para no saturar consola
+} catch (e) {
+    console.log(`Auto-ping fallo: ${e.message}`);
+}
     }, 10 * 60 * 1000);
 });
 
@@ -968,5 +968,6 @@ async function connectToWhatsApp() {
 console.log("Iniciando Ghost Bot...");
 console.log(`Zona horaria: ${process.env.TZ || 'America/Mexico_City'}`);
 connectToWhatsApp();
+
 
 
