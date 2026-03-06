@@ -81,7 +81,7 @@ const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
     { hour: 22, minute: 30 },
-    { hour: 1, minute: 40 }
+    { hour: 2, minute: 10 }
 ];
 
 let lastNewsSentKey  = null;
@@ -98,43 +98,46 @@ setInterval(() => {
 
 // ============================================================
 // SCRAPER — CONFIGURACIÓN
+// ✅ 4 sitios: UM Noticias, Zona Franca (RSS), Entérate León, AM León (RSS)
 // ============================================================
 const SITIOS = [
     {
-        nombre:   'UM Noticias',
-        url:      'https://umnoticias.com.mx/seccion/local/',
-        dominio:  'umnoticias.com.mx',
-        tipo:     'wordpress'
+        nombre:  'UM Noticias',
+        url:     'https://umnoticias.com.mx/seccion/local/',
+        dominio: 'umnoticias.com.mx',
+        tipo:    'wordpress'
     },
     {
-        nombre:   'Zona Franca',
-        url:      'https://zonafranca.mx/feed/',
+        nombre:      'Zona Franca',
+        url:         'https://zonafranca.mx/feed/',
         urlFallback: 'https://zonafranca.mx/category/local/feed/',
-        dominio:  'zonafranca.mx',
-        tipo:     'rss'
+        dominio:     'zonafranca.mx',
+        tipo:        'rss'
     },
     {
-        nombre:   'Entérate León',
-        url:          'https://enterate.leon.gob.mx/?cat=comunicados',
-        urlFallback:  'https://enterate.leon.gob.mx/',
-        dominio:      'enterate.leon.gob.mx',
-        tipo:         'gobierno',
+        nombre:          'Entérate León',
+        url:             'https://enterate.leon.gob.mx/?cat=comunicados',
+        urlFallback:     'https://enterate.leon.gob.mx/',
+        dominio:         'enterate.leon.gob.mx',
+        tipo:            'gobierno',
         selectoresLista: [
-            'h1 a[href]',
-            'h2 a[href]',
-            'h3 a[href]',
-            'h4 a[href]',
-            'article a[href]',
-            '.entry-title a[href]',
-            '.post-title a[href]',
-            '.titulo a[href]',
-            'a[href*="enterate.leon.gob.mx"]'
+            'h1 a[href]', 'h2 a[href]', 'h3 a[href]', 'h4 a[href]',
+            'article a[href]', '.entry-title a[href]', '.post-title a[href]',
+            '.titulo a[href]', 'a[href*="enterate.leon.gob.mx"]'
         ]
+    },
+    {
+        // ✅ NUEVO: AM León — diario más grande de León/Guanajuato
+        // RSS principal + fallback a scraping directo de sección León
+        nombre:      'AM León',
+        url:         'https://www.am.com.mx/feed/',
+        urlFallback: 'https://www.am.com.mx/leon/',
+        dominio:     'am.com.mx',
+        tipo:        'rss'
     }
 ];
 
 const MAX_NOTICIAS_POR_SITIO = 2;
-const META_NOTICIAS_TOTAL    = 2;
 const MAX_CHARS_RESUMEN      = 900;
 
 const USER_AGENTS = [
@@ -164,6 +167,7 @@ function getBaseHeaders(extra = {}) {
 
 // ============================================================
 // SCRAPER — FECHAS
+// ✅ Acepta hasta 3 días atrás
 // ============================================================
 function getFechasValidas() {
     const ahora = new Date();
@@ -175,18 +179,16 @@ function getFechasValidas() {
     const [hd, hm, hy] = hoyStr.split('/');
     const hoy = new Date(+hy, +hm - 1, +hd);
 
-    const ayer = new Date(hoy);
-    ayer.setDate(hoy.getDate() - 1);
-
-    const antier = new Date(hoy);
-    antier.setDate(hoy.getDate() - 2);
+    const ayer  = new Date(hoy); ayer.setDate(hoy.getDate() - 1);
+    const hace2 = new Date(hoy); hace2.setDate(hoy.getDate() - 2);
+    const hace3 = new Date(hoy); hace3.setDate(hoy.getDate() - 3);
 
     const fmt = (d) => ({
         iso:   `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`,
         label: d.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })
     });
 
-    return { hoy: fmt(hoy), ayer: fmt(ayer), antier: fmt(antier), ahora };
+    return { hoy: fmt(hoy), ayer: fmt(ayer), hace2: fmt(hace2), hace3: fmt(hace3), ahora };
 }
 
 function parsearFechaTexto(textoFecha) {
@@ -204,9 +206,9 @@ function parsearFechaTexto(textoFecha) {
         const n = parseInt(m[1]);
         const unidad = m[2];
         const ahora = new Date();
-        if (unidad.startsWith('minuto'))  ahora.setMinutes(ahora.getMinutes() - n);
+        if (unidad.startsWith('minuto'))    ahora.setMinutes(ahora.getMinutes() - n);
         else if (unidad.startsWith('hora')) ahora.setHours(ahora.getHours() - n);
-        else if (unidad.startsWith('d'))   ahora.setDate(ahora.getDate() - n);
+        else if (unidad.startsWith('d'))    ahora.setDate(ahora.getDate() - n);
         return ahora;
     }
 
@@ -237,15 +239,17 @@ function parsearFechaTexto(textoFecha) {
     return null;
 }
 
+// ✅ Acepta hoy, ayer, hace 2 y hace 3 días
 function esFechaValida(textoFecha, fechasValidas) {
     const fecha = parsearFechaTexto(textoFecha);
     if (!fecha) return { valida: false, cual: null };
 
     const iso = `${fecha.getFullYear()}-${String(fecha.getMonth()+1).padStart(2,'0')}-${String(fecha.getDate()).padStart(2,'0')}`;
 
-    if (iso === fechasValidas.hoy.iso)    return { valida: true, cual: 'hoy' };
-    if (iso === fechasValidas.ayer.iso)   return { valida: true, cual: 'ayer' };
-    if (iso === fechasValidas.antier.iso) return { valida: true, cual: 'ayer' };
+    if (iso === fechasValidas.hoy.iso)   return { valida: true, cual: 'hoy' };
+    if (iso === fechasValidas.ayer.iso)  return { valida: true, cual: 'ayer' };
+    if (iso === fechasValidas.hace2.iso) return { valida: true, cual: 'ayer' };
+    if (iso === fechasValidas.hace3.iso) return { valida: true, cual: 'ayer' };
     return { valida: false, cual: null };
 }
 
@@ -312,7 +316,7 @@ async function fetchHTML(url, headersExtra = {}, intentos = 3) {
 }
 
 // ============================================================
-// SCRAPER — EXTRAER FECHA DE UN ARTÍCULO
+// SCRAPER — EXTRAER FECHA
 // ============================================================
 function extraerFecha($a) {
     const metaCandidatos = [
@@ -340,13 +344,9 @@ function extraerFecha($a) {
     if (haceTexto) return haceTexto;
 
     const timeText = $a('time').first().text().trim();
-    if (timeText && timeText.length > 3 && timeText.length < 80 &&
-        /\d/.test(timeText)) return timeText;
+    if (timeText && timeText.length > 3 && timeText.length < 80 && /\d/.test(timeText)) return timeText;
 
-    const clasesFecha = [
-        '.fecha', '.post-date', '.published', '.entry-date',
-        '.date', '.article-date', '.timestamp'
-    ];
+    const clasesFecha = ['.fecha', '.post-date', '.published', '.entry-date', '.date', '.article-date', '.timestamp'];
     for (const sel of clasesFecha) {
         try {
             const t = $a(sel).first().text().trim();
@@ -361,20 +361,13 @@ function extraerFecha($a) {
 }
 
 // ============================================================
-// SCRAPER — EXTRAER RESUMEN DE UN ARTÍCULO
+// SCRAPER — EXTRAER RESUMEN
 // ============================================================
 function extraerResumen($a) {
     const selectores = [
-        'article .entry-content p',
-        'article .post-content p',
-        '.entry-content p',
-        '.post-content p',
-        '.contenido p',
-        '.content p',
-        '.article-body p',
-        'article p',
-        '.nota p',
-        'main p'
+        'article .entry-content p', 'article .post-content p',
+        '.entry-content p', '.post-content p', '.contenido p',
+        '.content p', '.article-body p', 'article p', '.nota p', 'main p'
     ];
     const parrafos = [];
     for (const sel of selectores) {
@@ -395,7 +388,7 @@ function extraerResumen($a) {
 }
 
 // ============================================================
-// SCRAPER — EXTRAER ENLACES DE LA PÁGINA PRINCIPAL
+// SCRAPER — EXTRAER ENLACES
 // ============================================================
 function extraerEnlaces($, sitio) {
     const enlaces = [];
@@ -440,11 +433,14 @@ async function scrapearRSS(sitio, fechasValidas) {
     console.log(`Scrapeando RSS: ${sitio.nombre} → ${sitio.url}`);
     const resultado = { sitio: sitio.nombre, noticias: [], sinNoticias: false, error: null };
 
-    const urlsIntentar = [sitio.url];
-    if (sitio.urlFallback) urlsIntentar.push(sitio.urlFallback);
+    // Solo intentar URLs que sean feed RSS (contienen 'feed' en la URL)
+    const urlsRSS = [sitio.url];
+    if (sitio.urlFallback && sitio.urlFallback.includes('feed')) {
+        urlsRSS.push(sitio.urlFallback);
+    }
 
     let xmlData = null;
-    for (const rssUrl of urlsIntentar) {
+    for (const rssUrl of urlsRSS) {
         try {
             const resp = await axios.get(rssUrl, {
                 headers: {
@@ -467,7 +463,13 @@ async function scrapearRSS(sitio, fechasValidas) {
         }
     }
 
+    // ✅ Si el RSS falla y hay fallback de scraping HTML, usarlo
     if (!xmlData) {
+        if (sitio.urlFallback && !sitio.urlFallback.includes('feed')) {
+            console.log(`   RSS sin datos, usando fallback HTML: ${sitio.urlFallback}`);
+            const sitioFallback = { ...sitio, url: sitio.urlFallback, tipo: 'wordpress' };
+            return scrapearSitioHTML(sitioFallback, fechasValidas);
+        }
         resultado.error = 'No se pudo acceder al RSS';
         console.error(`ERROR RSS ${sitio.nombre}: sin datos`);
         return resultado;
@@ -485,7 +487,6 @@ async function scrapearRSS(sitio, fechasValidas) {
             const pubDate = $(el).find('pubDate').first().text().trim() ||
                             $(el).find('dc\\:date, date').first().text().trim();
             const desc    = $(el).find('description').first().text().trim();
-            const link    = $(el).find('link').first().text().trim();
 
             if (!titular || titular.length < 5) return;
 
@@ -525,12 +526,10 @@ async function scrapearRSS(sitio, fechasValidas) {
 }
 
 // ============================================================
-// SCRAPER — SCRAPING POR SITIO
+// SCRAPER — HTML NORMAL
 // ============================================================
-async function scrapearSitio(sitio, fechasValidas) {
-    if (sitio.tipo === 'rss') return scrapearRSS(sitio, fechasValidas);
-
-    console.log(`Scrapeando: ${sitio.nombre} → ${sitio.url}`);
+async function scrapearSitioHTML(sitio, fechasValidas) {
+    console.log(`Scrapeando HTML: ${sitio.nombre} → ${sitio.url}`);
     const resultado = { sitio: sitio.nombre, noticias: [], sinNoticias: false, error: null };
 
     try {
@@ -539,7 +538,7 @@ async function scrapearSitio(sitio, fechasValidas) {
         let enlaces = extraerEnlaces($, sitio);
 
         if (enlaces.length === 0 && sitio.urlFallback) {
-            console.log(`   Sin enlaces en URL principal, intentando fallback: ${sitio.urlFallback}`);
+            console.log(`   Sin enlaces, intentando fallback: ${sitio.urlFallback}`);
             htmlPrincipal = await fetchHTML(sitio.urlFallback, sitio.headersExtra || {});
             $ = cheerio.load(htmlPrincipal);
             enlaces = extraerEnlaces($, sitio);
@@ -549,7 +548,6 @@ async function scrapearSitio(sitio, fechasValidas) {
 
         if (enlaces.length === 0) {
             resultado.sinNoticias = true;
-            console.log(`   Sin enlaces en ${sitio.nombre}`);
             return resultado;
         }
 
@@ -563,10 +561,10 @@ async function scrapearSitio(sitio, fechasValidas) {
                     'Sin titular'
                 );
 
-                const fecha     = extraerFecha($a);
-                const resumen   = extraerResumen($a);
-                const titularL  = limpiarTexto(titular);
-                const resumenL  = cortarEnOracionCompleta(limpiarTexto(resumen), MAX_CHARS_RESUMEN);
+                const fecha      = extraerFecha($a);
+                const resumen    = extraerResumen($a);
+                const titularL   = limpiarTexto(titular);
+                const resumenL   = cortarEnOracionCompleta(limpiarTexto(resumen), MAX_CHARS_RESUMEN);
                 const validacion = esFechaValida(fecha, fechasValidas);
 
                 if (validacion.valida) {
@@ -584,7 +582,7 @@ async function scrapearSitio(sitio, fechasValidas) {
                 } else {
                     console.log(`   ⏭ DESCARTADA - Fecha: "${fecha}"`);
                     const fp = parsearFechaTexto(fecha);
-                    if (fp && (new Date() - fp) / 86400000 > 5) {
+                    if (fp && (new Date() - fp) / 86400000 > 7) {
                         console.log(`   Noticias demasiado antiguas en ${sitio.nombre}, deteniendo.`);
                         break;
                     }
@@ -599,11 +597,10 @@ async function scrapearSitio(sitio, fechasValidas) {
         }
 
         resultado.sinNoticias = resultado.noticias.length === 0;
-        if (resultado.sinNoticias) {
-            console.log(`   Sin noticias válidas hoy/ayer en ${sitio.nombre}`);
-        } else {
-            console.log(`   ${resultado.noticias.length} noticia(s) obtenida(s) de ${sitio.nombre}`);
-        }
+        console.log(resultado.sinNoticias
+            ? `   Sin noticias válidas (últimos 3 días) en ${sitio.nombre}`
+            : `   ${resultado.noticias.length} noticia(s) obtenida(s) de ${sitio.nombre}`
+        );
 
     } catch (err) {
         resultado.error = err.message;
@@ -614,11 +611,19 @@ async function scrapearSitio(sitio, fechasValidas) {
 }
 
 // ============================================================
+// SCRAPER — DISPATCHER POR TIPO
+// ============================================================
+async function scrapearSitio(sitio, fechasValidas) {
+    if (sitio.tipo === 'rss') return scrapearRSS(sitio, fechasValidas);
+    return scrapearSitioHTML(sitio, fechasValidas);
+}
+
+// ============================================================
 // SCRAPER — EJECUTAR TODOS LOS SITIOS
 // ============================================================
 async function ejecutarScraper() {
     const fechasValidas = getFechasValidas();
-    console.log(`Scraper iniciado — HOY: ${fechasValidas.hoy.label} | AYER: ${fechasValidas.ayer.label}`);
+    console.log(`Scraper iniciado — HOY: ${fechasValidas.hoy.label} | AYER: ${fechasValidas.ayer.label} | HACE2: ${fechasValidas.hace2.label} | HACE3: ${fechasValidas.hace3.label}`);
 
     const resultados = [];
     for (const sitio of SITIOS) {
@@ -739,8 +744,8 @@ async function sendDailyNews(sock, isManual = false) {
 }
 
 // ============================================================
-// PROGRAMAR NOTICIAS — SCHEDULER
-// ✅ FIX: Usa globalSock en lugar del sock capturado al inicio
+// SCHEDULER — PROGRAMAR NOTICIAS
+// ✅ Usa globalSock siempre para evitar socket fantasma
 // ============================================================
 function scheduleNews(sock) {
     if (newsScheduled) return;
@@ -768,11 +773,54 @@ function scheduleNews(sock) {
         if (lastNewsSentKey !== timeKey) {
             lastNewsSentKey = timeKey;
             console.log(`⏰ Disparando noticias — ${h}:${String(min).padStart(2,'0')}`);
-            // ✅ FIX PRINCIPAL: Siempre usar globalSock (el socket activo actual)
-            // El sock original puede estar muerto si hubo reconexiones
             sendDailyNews(globalSock);
         }
     }, 15000);
+}
+
+// ============================================================
+// HELPER — EXTRAER TEXTO (todos los formatos de WhatsApp)
+// ✅ Cubre conversation, extendedText, caption de imagen/video, etc.
+// ============================================================
+function extraerTextoMensaje(m) {
+    return (
+        m.message?.conversation ||
+        m.message?.extendedTextMessage?.text ||
+        m.message?.imageMessage?.caption ||
+        m.message?.videoMessage?.caption ||
+        m.message?.buttonsResponseMessage?.selectedDisplayText ||
+        m.message?.listResponseMessage?.title ||
+        m.message?.templateButtonReplyMessage?.selectedDisplayText ||
+        ''
+    ).trim();
+}
+
+// ============================================================
+// HELPER — ENVIAR SALUDO (reutilizable)
+// ============================================================
+async function enviarSaludo(sock, remoteJid) {
+    const imagePath   = './Imagenes2/Ghostcmd.png';
+    const audioPath   = './Vozcomandante.ogg';
+    const welcomeText = "Saludos hermano¡ en estos momentos quizá me encuentro ocupado pero este es mi asistente digital, dime en que te puedo ayudar?";
+
+    try {
+        if (fs.existsSync(imagePath)) {
+            await sock.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption: welcomeText });
+            console.log(`   ✅ Imagen de saludo enviada a: ${remoteJid.split('@')[0]}`);
+        } else {
+            await sock.sendMessage(remoteJid, { text: welcomeText });
+            console.log(`   ⚠️ Imagen no encontrada (${imagePath}), se envió texto.`);
+        }
+        await sleep(1000);
+        if (fs.existsSync(audioPath)) {
+            await sock.sendMessage(remoteJid, { audio: fs.readFileSync(audioPath), mimetype: 'audio/ogg; codecs=opus', ptt: true });
+            console.log(`   ✅ Audio de saludo enviado a: ${remoteJid.split('@')[0]}`);
+        } else {
+            console.log(`   ⚠️ Audio no encontrado (${audioPath}), se omite.`);
+        }
+    } catch (e) {
+        console.log(`   ❌ ERROR en enviarSaludo a ${remoteJid.split('@')[0]}: ${e.message}`);
+    }
 }
 
 // ============================================================
@@ -802,8 +850,7 @@ async function connectToWhatsApp() {
 
     globalSock = sock;
 
-    // ✅ FIX: keepAlive detecta desconexiones silenciosas de WhatsApp
-    // Antes usaba .catch(() => {}) que tragaba los errores sin avisar
+    // ✅ FIX: keepAlive detecta caídas silenciosas de WhatsApp
     if (!keepAliveStarted) {
         keepAliveStarted = true;
         setInterval(async () => {
@@ -855,16 +902,36 @@ async function connectToWhatsApp() {
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (type !== "notify") return;
         const m = messages[0];
-        if (!m.message || m.key.fromMe) return;
+        if (!m?.message) return;
+
+        const remoteJid = m.key.remoteJid;
+        const esGrupo   = remoteJid.endsWith("@g.us");
+        const esMio     = m.key.fromMe;
+
+        // ✅ LOG DE DEBUG DETALLADO para mensajes privados entrantes
+        if (!esGrupo && !esMio) {
+            const tiposPresentes = Object.keys(m.message || {}).join(', ');
+            const textoExtraido  = extraerTextoMensaje(m);
+            console.log(`=== MSG PRIVADO RECIBIDO ===`);
+            console.log(`   De:            ${remoteJid.split('@')[0]}`);
+            console.log(`   Tipos WA:      ${tiposPresentes}`);
+            console.log(`   Texto:         "${textoExtraido}"`);
+            console.log(`   Es /saludo:    ${textoExtraido.toLowerCase() === '/saludo'}`);
+            console.log(`   Ya saludado:   ${firstTimeUsers.has(remoteJid)}`);
+            console.log(`===========================`);
+        }
 
         const msgId = m.key.id;
-        if (processedMessages.has(msgId)) return;
+        if (processedMessages.has(msgId)) {
+            console.log(`   [SKIP] Mensaje ya procesado: ${msgId}`);
+            return;
+        }
         processedMessages.add(msgId);
         setTimeout(() => processedMessages.delete(msgId), 300000);
 
-        const remoteJid = m.key.remoteJid;
-        const text = (m.message.conversation || m.message.extendedTextMessage?.text || "").trim();
+        const text = extraerTextoMensaje(m);
 
+        // ── GRUPO DE NOTICIAS ──
         if (remoteJid === NEWS_GROUP_ID) {
             if (text.toLowerCase() === "@sendinstructionsnotice") {
                 console.log("Comando manual recibido: enviando noticias...");
@@ -873,50 +940,24 @@ async function connectToWhatsApp() {
             return;
         }
 
-        if (remoteJid.endsWith("@g.us")) return;
+        // ── IGNORAR OTROS GRUPOS ──
+        if (esGrupo) return;
 
-        // ✅ NUEVO: Comando /saludo — reenvía bienvenida en cualquier momento
+        // ── IGNORAR MENSAJES PROPIOS ──
+        if (esMio) return;
+
+        // ── COMANDO /saludo ──
         if (text.toLowerCase() === '/saludo') {
-            const imagePath   = './Imagenes2/Ghostcmd.png';
-            const audioPath   = './Vozcomandante.ogg';
-            const welcomeText = "Saludos hermano¡ en estos momentos quizá me encuentro ocupado pero este es mi asistente digital, dime en que te puedo ayudar?";
-            try {
-                if (fs.existsSync(imagePath)) {
-                    await sock.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption: welcomeText });
-                } else {
-                    await sock.sendMessage(remoteJid, { text: welcomeText });
-                }
-                await sleep(1000);
-                if (fs.existsSync(audioPath)) {
-                    await sock.sendMessage(remoteJid, { audio: fs.readFileSync(audioPath), mimetype: 'audio/ogg; codecs=opus', ptt: true });
-                }
-                console.log(`Saludo manual enviado a: ${remoteJid.split('@')[0]}`);
-            } catch (e) {
-                console.log(`Error saludo manual: ${e.message}`);
-            }
+            console.log(`Comando /saludo activado para: ${remoteJid.split('@')[0]}`);
+            await enviarSaludo(sock, remoteJid);
             return;
         }
 
+        // ── BIENVENIDA AUTOMÁTICA (primer contacto) ──
         if (!firstTimeUsers.has(remoteJid)) {
             firstTimeUsers.add(remoteJid);
-            const imagePath   = './Imagenes2/Ghostcmd.png';
-            const audioPath   = './Vozcomandante.ogg';
-            const welcomeText = "Saludos hermano¡ en estos momentos quizá me encuentro ocupado pero este es mi asistente digital, dime en que te puedo ayudar?";
-
-            try {
-                if (fs.existsSync(imagePath)) {
-                    await sock.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption: welcomeText });
-                } else {
-                    await sock.sendMessage(remoteJid, { text: welcomeText });
-                }
-                await sleep(1000);
-                if (fs.existsSync(audioPath)) {
-                    await sock.sendMessage(remoteJid, { audio: fs.readFileSync(audioPath), mimetype: 'audio/ogg; codecs=opus', ptt: true });
-                }
-                console.log(`Nuevo usuario saludado: ${remoteJid.split('@')[0]}`);
-            } catch (e) {
-                console.log(`Error bienvenida: ${e.message}`);
-            }
+            console.log(`Nuevo usuario, enviando bienvenida: ${remoteJid.split('@')[0]}`);
+            await enviarSaludo(sock, remoteJid);
         }
     });
 }
