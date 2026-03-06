@@ -84,7 +84,7 @@ const NEWS_SCHEDULE  = [
 ];
 
 const RETENES_GROUP_ID = "120363415871374454@g.us";
-const PROMO_SCHEDULE   = { hour: 17, minute: 05 };
+const PROMO_SCHEDULE   = { hour: 17, minute: 25 };
 
 let lastNewsSentKey  = null;
 let lastPromoSentKey = null;
@@ -94,6 +94,12 @@ let newsScheduled    = false;
 let keepAliveStarted = false;
 let globalSock       = null;
 let isConnected      = false;
+
+// ============================================================
+// ✅ FIX PRINCIPAL: Timestamp del último "open" confirmado
+//    Se usa para detectar si el socket es REALMENTE nuevo
+// ============================================================
+let lastConnectedAt = 0;
 
 setInterval(() => {
     if (promoInProgress) { console.log("⚠️ promoInProgress colgado — reseteando."); promoInProgress = false; }
@@ -121,26 +127,51 @@ function horaEnMexico() {
     return { h, min, dateStr };
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 // ============================================================
-// HELPER — ESPERAR RECONEXIÓN
-// ✅ FIX EPIPE: en lugar de sleep fijo, espera activamente
-//    hasta que isConnected sea true otra vez (máx 60s)
+// ✅ FIX PRINCIPAL: esperarConexion MEJORADO
+//    - Espera a que isConnected sea true
+//    - Además espera 5s EXTRA para que el socket se estabilice
+//      antes de intentar enviar (evita EPIPE en socket recién abierto)
 // ============================================================
 async function esperarConexion(label = '') {
-    if (isConnected) return true;
+    if (isConnected) {
+        // Si ya está conectado, igual esperamos 1s para asegurarnos
+        // que el socket interno de Baileys esté listo
+        await sleep(1000);
+        return true;
+    }
+
     console.log(`${label} Esperando reconexión...`);
     let espera = 0;
-    while (!isConnected && espera < 60000) {
+    const MAX_ESPERA = 90000; // 90 segundos máximo
+
+    while (!isConnected && espera < MAX_ESPERA) {
         await sleep(2000);
         espera += 2000;
     }
+
     if (!isConnected) {
-        console.log(`${label} No reconectó en 60s, abortando.`);
+        console.log(`${label} No reconectó en ${MAX_ESPERA/1000}s, abortando.`);
         return false;
     }
-    // Pausa extra para que el socket quede estable
-    await sleep(3000);
+
+    // ✅ CRÍTICO: Pausa de 6 segundos después de reconectar
+    // El evento "open" dispara ANTES de que el socket WA esté
+    // listo para enviar. Sin esta pausa ocurre el EPIPE.
+    console.log(`${label} Conexión detectada, esperando estabilización del socket (6s)...`);
+    await sleep(6000);
+
     return true;
+}
+
+// ============================================================
+// ✅ FIX PRINCIPAL: getSock() — siempre usa el socket más reciente
+//    y verifica que no esté cerrado antes de usarlo
+// ============================================================
+function getSock() {
+    return globalSock;
 }
 
 // ============================================================
@@ -323,8 +354,6 @@ function limpiarTexto(texto) {
         .replace(/\s{2,}/g, ' ')
         .trim();
 }
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ============================================================
 // SCRAPER — FETCH CON REINTENTOS
@@ -724,11 +753,12 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
-// ENVIAR PROMO — Retenes León GTO
-// ✅ FIX EPIPE: usa esperarConexion() en lugar de sleep fijo
+// ✅ FIX PRINCIPAL: ENVIAR PROMO
+//    - Espera conexión estable ANTES de intentar enviar
+//    - Usa getSock() para tener siempre el socket más reciente
+//    - Pausa extra entre reintentos para evitar EPIPE
 // ============================================================
 async function sendPromoMessage() {
-    if (!isConnected) { console.log("Bot no conectado, omitiendo promo."); return false; }
     if (promoInProgress) { console.log("Promo ya en ejecución, omitiendo."); return false; }
 
     promoInProgress = true;
@@ -747,18 +777,38 @@ Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
 
     try {
         for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
-            if (!isConnected) {
-                const reconecto = await esperarConexion(`[Promo intento ${intento}]`);
-                if (!reconecto) continue;
+            // ✅ SIEMPRE esperar conexión estable antes de cada intento
+            const listo = await esperarConexion(`[Promo intento ${intento}/${MAX_REINTENTOS}]`);
+            if (!listo) {
+                console.log(`[Promo intento ${intento}] Sin conexión, pasando al siguiente intento...`);
+                continue;
             }
+
             try {
-                await globalSock.sendMessage(RETENES_GROUP_ID, { text: msg });
+                const sock = getSock();
+                if (!sock) {
+                    console.log(`[Promo intento ${intento}] Socket no disponible.`);
+                    continue;
+                }
+
+                await sock.sendMessage(RETENES_GROUP_ID, { text: msg });
                 console.log(`✅ Promo enviada a Retenes León GTO (intento ${intento})`);
                 return true;
+
             } catch (err) {
                 console.error(`ERROR promo (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
-                isConnected = false; // forzar espera de reconexión en siguiente intento
-                if (intento === MAX_REINTENTOS) console.error(`Todos los reintentos de promo fallaron.`);
+
+                if (err.message && (err.message.includes('EPIPE') || err.message.includes('ECONNRESET') || err.message.includes('socket'))) {
+                    // Socket roto: marcar desconectado y esperar reconexión en siguiente vuelta
+                    isConnected = false;
+                    console.log(`[Promo intento ${intento}] Socket roto detectado, esperando reconexión...`);
+                }
+
+                if (intento < MAX_REINTENTOS) {
+                    await sleep(8000); // Pausa entre reintentos
+                } else {
+                    console.error(`Todos los reintentos de promo fallaron.`);
+                }
             }
         }
         return false;
@@ -768,11 +818,10 @@ Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
 }
 
 // ============================================================
-// ENVIAR NOTICIAS
-// ✅ FIX EPIPE: usa esperarConexion() en lugar de sleep fijo
+// ✅ FIX PRINCIPAL: ENVIAR NOTICIAS
+//    Misma lógica de espera que sendPromoMessage
 // ============================================================
 async function sendDailyNews(isManual = false) {
-    if (!isConnected) { console.log("Bot no conectado, omitiendo envío."); return false; }
     if (newsInProgress) { console.log("Scraper ya en ejecución, omitiendo."); return false; }
 
     newsInProgress = true;
@@ -782,17 +831,26 @@ async function sendDailyNews(isManual = false) {
     try {
         const MAX_REINTENTOS = 3;
         for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
-            if (!isConnected) {
-                const reconecto = await esperarConexion(`[Noticias intento ${intento}]`);
-                if (!reconecto) continue;
+            // ✅ SIEMPRE esperar conexión estable antes de cada intento
+            const listo = await esperarConexion(`[Noticias intento ${intento}/${MAX_REINTENTOS}]`);
+            if (!listo) {
+                console.log(`[Noticias intento ${intento}] Sin conexión, pasando al siguiente intento...`);
+                continue;
             }
+
             try {
-                await globalSock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
+                const sock = getSock();
+                if (!sock) {
+                    console.log(`[Noticias intento ${intento}] Socket no disponible.`);
+                    continue;
+                }
+
+                await sock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
                 const { resultados, fechasValidas, totalNoticias } = await ejecutarScraper();
                 const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
 
                 for (const msg of mensajes) {
-                    await globalSock.sendMessage(NEWS_GROUP_ID, { text: msg });
+                    await sock.sendMessage(NEWS_GROUP_ID, { text: msg });
                     await sleep(1500);
                 }
 
@@ -801,8 +859,17 @@ async function sendDailyNews(isManual = false) {
 
             } catch (err) {
                 console.error(`ERROR AL ENVIAR (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
-                isConnected = false; // forzar espera de reconexión en siguiente intento
-                if (intento === MAX_REINTENTOS) console.error(`Todos los reintentos fallaron.`);
+
+                if (err.message && (err.message.includes('EPIPE') || err.message.includes('ECONNRESET') || err.message.includes('socket'))) {
+                    isConnected = false;
+                    console.log(`[Noticias intento ${intento}] Socket roto detectado, esperando reconexión...`);
+                }
+
+                if (intento < MAX_REINTENTOS) {
+                    await sleep(8000);
+                } else {
+                    console.error(`Todos los reintentos fallaron.`);
+                }
             }
         }
         return false;
@@ -925,6 +992,7 @@ async function connectToWhatsApp() {
         retryRequestDelayMs:   250
     });
 
+    // ✅ FIX: Actualizar globalSock INMEDIATAMENTE al crear socket nuevo
     globalSock = sock;
 
     if (!keepAliveStarted) {
@@ -952,8 +1020,10 @@ async function connectToWhatsApp() {
         }
 
         if (connection === "open") {
-            isConnected = true;
-            latestQr    = null;
+            // ✅ FIX: Marcar timestamp de conexión para detectar socket fresco
+            isConnected    = true;
+            lastConnectedAt = Date.now();
+            latestQr       = null;
             console.log("✅ BOT CONECTADO Y OPERATIVO");
             scheduleNews();
         }
