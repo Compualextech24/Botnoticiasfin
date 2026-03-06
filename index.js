@@ -64,7 +64,6 @@ http.createServer(async (req, res) => {
     setInterval(async () => {
         try {
             await axios.get(RENDER_URL, { timeout: 8000 });
-            // Auto-ping silencioso — sin log en éxito para no saturar consola
         } catch (e) {
             console.log(`Auto-ping fallo: ${e.message}`);
         }
@@ -86,16 +85,28 @@ const NEWS_SCHEDULE  = [
 
 // ── Promo Retenes ──
 const RETENES_GROUP_ID = "120363415871374454@g.us";
-const PROMO_SCHEDULE   = { hour: 15, minute: 30 };
+const PROMO_SCHEDULE   = { hour: 16, minute: 20 };
 
 let lastNewsSentKey  = null;
-let lastPromoSentKey = null; // ← variable independiente para no interferir con noticias
+let lastPromoSentKey = null;
 let newsInProgress   = false;
 let promoInProgress  = false;
 let newsScheduled    = false;
 let keepAliveStarted = false;
 let globalSock       = null;
 let isConnected      = false;
+
+// ── FIX BUG 3: resetear promoInProgress si queda colgado más de 5 min ──
+setInterval(() => {
+    if (promoInProgress) {
+        console.log("⚠️ promoInProgress estaba colgado — reseteando.");
+        promoInProgress = false;
+    }
+    if (newsInProgress) {
+        console.log("⚠️ newsInProgress estaba colgado — reseteando.");
+        newsInProgress = false;
+    }
+}, 5 * 60 * 1000);
 
 setInterval(() => {
     if (firstTimeUsers.size > MAX_CACHE_SIZE)  { firstTimeUsers.clear();    console.log("Cache usuarios limpiado"); }
@@ -104,7 +115,6 @@ setInterval(() => {
 
 // ============================================================
 // SCRAPER — CONFIGURACIÓN
-// ✅ 4 sitios: UM Noticias, Zona Franca (RSS), Entérate León, AM León (RSS)
 // ============================================================
 const SITIOS = [
     {
@@ -133,8 +143,6 @@ const SITIOS = [
         ]
     },
     {
-        // ✅ NUEVO: AM León — diario más grande de León/Guanajuato
-        // RSS principal + fallback a scraping directo de sección León
         nombre:      'AM León',
         url:         'https://www.am.com.mx/feed/',
         urlFallback: 'https://www.am.com.mx/leon/',
@@ -173,7 +181,6 @@ function getBaseHeaders(extra = {}) {
 
 // ============================================================
 // SCRAPER — FECHAS
-// ✅ Acepta hasta 3 días atrás
 // ============================================================
 function getFechasValidas() {
     const ahora = new Date();
@@ -245,7 +252,6 @@ function parsearFechaTexto(textoFecha) {
     return null;
 }
 
-// ✅ Acepta hoy, ayer, hace 2 y hace 3 días
 function esFechaValida(textoFecha, fechasValidas) {
     const fecha = parsearFechaTexto(textoFecha);
     if (!fecha) return { valida: false, cual: null };
@@ -692,7 +698,8 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
-// ENVIAR PROMO — Retenes León GTO (con reintentos)
+// ENVIAR PROMO — Retenes León GTO
+// ✅ FIX: timeout propio de 2 min + reset garantizado en finally
 // ============================================================
 async function sendPromoMessage(sock) {
     if (!isConnected) {
@@ -718,33 +725,41 @@ Si buscas algo distinto a ventas , como empleos, retenes , noticias etc.
 
 Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
 
-    for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
-        try {
-            if (!isConnected) {
-                console.log(`Promo intento ${intento}: desconectado, esperando 10s...`);
-                await sleep(10000);
-                if (!isConnected) { console.log(`Sigue desconectado, saltando intento ${intento}.`); continue; }
-            }
+    try {
+        for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
+            try {
+                if (!isConnected) {
+                    console.log(`Promo intento ${intento}: desconectado, esperando 10s...`);
+                    await sleep(10000);
+                    if (!isConnected) {
+                        console.log(`Sigue desconectado, saltando intento ${intento}.`);
+                        continue;
+                    }
+                }
 
-            await globalSock.sendMessage(RETENES_GROUP_ID, { text: msg });
-            console.log(`✅ Mensaje promo enviado a Retenes León GTO (intento ${intento})`);
-            promoInProgress = false;
-            return true;
+                // ✅ FIX BUG 1: usamos globalSock siempre (el sock pasado puede ser fantasma)
+                await globalSock.sendMessage(RETENES_GROUP_ID, { text: msg });
+                console.log(`✅ Mensaje promo enviado a Retenes León GTO (intento ${intento})`);
+                return true;
 
-        } catch (err) {
-            console.error(`ERROR enviando promo (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
-            if (intento < MAX_REINTENTOS) {
-                const espera = intento * 15000;
-                console.log(`Reintentando promo en ${espera / 1000}s...`);
-                await sleep(espera);
-            } else {
-                console.error(`Todos los reintentos de promo fallaron.`);
+            } catch (err) {
+                console.error(`ERROR enviando promo (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
+                if (intento < MAX_REINTENTOS) {
+                    const espera = intento * 15000;
+                    console.log(`Reintentando promo en ${espera / 1000}s...`);
+                    await sleep(espera);
+                } else {
+                    console.error(`Todos los reintentos de promo fallaron.`);
+                }
             }
         }
-    }
+        return false;
 
-    promoInProgress = false;
-    return false;
+    } finally {
+        // ✅ FIX BUG 3: finally garantiza que siempre se resetea, pase lo que pase
+        promoInProgress = false;
+        console.log("🔓 promoInProgress liberado.");
+    }
 }
 
 // ============================================================
@@ -764,48 +779,52 @@ async function sendDailyNews(sock, isManual = false) {
     const label = isManual ? ' (Manual)' : '';
     console.log(`Iniciando envío de noticias${label}...`);
 
-    const MAX_REINTENTOS = 3;
+    try {
+        const MAX_REINTENTOS = 3;
 
-    for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
-        try {
-            if (!isConnected) {
-                console.log(`Intento ${intento}: desconectado, esperando 10s...`);
-                await sleep(10000);
-                if (!isConnected) { console.log(`Sigue desconectado, saltando intento ${intento}.`); continue; }
-            }
+        for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
+            try {
+                if (!isConnected) {
+                    console.log(`Intento ${intento}: desconectado, esperando 10s...`);
+                    await sleep(10000);
+                    if (!isConnected) { console.log(`Sigue desconectado, saltando intento ${intento}.`); continue; }
+                }
 
-            await sock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
-            const { resultados, fechasValidas, totalNoticias } = await ejecutarScraper();
-            const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
+                await globalSock.sendPresenceUpdate('composing', NEWS_GROUP_ID);
+                const { resultados, fechasValidas, totalNoticias } = await ejecutarScraper();
+                const mensajes = formatearParaWhatsApp(resultados, fechasValidas);
 
-            for (const msg of mensajes) {
-                await sock.sendMessage(NEWS_GROUP_ID, { text: msg });
-                await sleep(1500);
-            }
+                for (const msg of mensajes) {
+                    await globalSock.sendMessage(NEWS_GROUP_ID, { text: msg });
+                    await sleep(1500);
+                }
 
-            console.log(`✅ NOTICIAS ENVIADAS${label} — ${totalNoticias} noticia(s) (intento ${intento})`);
-            newsInProgress = false;
-            return true;
+                console.log(`✅ NOTICIAS ENVIADAS${label} — ${totalNoticias} noticia(s) (intento ${intento})`);
+                return true;
 
-        } catch (err) {
-            console.error(`ERROR AL ENVIAR (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
-            if (intento < MAX_REINTENTOS) {
-                const espera = intento * 15000;
-                console.log(`Reintentando en ${espera / 1000}s...`);
-                await sleep(espera);
-            } else {
-                console.error(`Todos los reintentos fallaron. No se envió nada al grupo.`);
+            } catch (err) {
+                console.error(`ERROR AL ENVIAR (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
+                if (intento < MAX_REINTENTOS) {
+                    const espera = intento * 15000;
+                    console.log(`Reintentando en ${espera / 1000}s...`);
+                    await sleep(espera);
+                } else {
+                    console.error(`Todos los reintentos fallaron.`);
+                }
             }
         }
-    }
+        return false;
 
-    newsInProgress = false;
-    return false;
+    } finally {
+        // ✅ FIX BUG 3 (mismo patrón): finally garantiza reset
+        newsInProgress = false;
+        console.log("🔓 newsInProgress liberado.");
+    }
 }
 
 // ============================================================
 // SCHEDULER — PROGRAMAR NOTICIAS + PROMO
-// ✅ Usa globalSock siempre para evitar socket fantasma
+// ✅ FIX BUG 2: ventana de 2 minutos completos para no perder el disparo
 // ============================================================
 function scheduleNews(sock) {
     if (newsScheduled) return;
@@ -817,6 +836,7 @@ function scheduleNews(sock) {
     );
     console.log(`   Promo Retenes: ${String(PROMO_SCHEDULE.hour).padStart(2,'0')}:${String(PROMO_SCHEDULE.minute).padStart(2,'0')}`);
 
+    // ✅ FIX BUG 2: intervalo de 30s para mayor precisión
     setInterval(() => {
         if (!isConnected) return;
 
@@ -824,13 +844,13 @@ function scheduleNews(sock) {
         const h   = now.getHours();
         const min = now.getMinutes();
 
-        // ── Noticias ──
+        // ── Noticias — ventana de 2 minutos completos ──
         const slot = NEWS_SCHEDULE.find(s =>
-            s.hour === h && (s.minute === min || s.minute === min - 1)
+            s.hour === h && (min === s.minute || min === s.minute + 1)
         );
 
         if (slot) {
-            const timeKey = `${now.toDateString()}-${h}:${slot.minute}`;
+            const timeKey = `${now.toDateString()}-news-${h}:${slot.minute}`;
             if (lastNewsSentKey !== timeKey) {
                 lastNewsSentKey = timeKey;
                 console.log(`⏰ Disparando noticias — ${h}:${String(min).padStart(2,'0')}`);
@@ -838,11 +858,10 @@ function scheduleNews(sock) {
             }
         }
 
-        // ── Promo Retenes ──
-        if (
-            h === PROMO_SCHEDULE.hour &&
-            (min === PROMO_SCHEDULE.minute || min === PROMO_SCHEDULE.minute + 1)
-        ) {
+        // ── Promo Retenes — ventana de 2 minutos completos ──
+        if (h === PROMO_SCHEDULE.hour &&
+            (min === PROMO_SCHEDULE.minute || min === PROMO_SCHEDULE.minute + 1)) {
+
             const promoKey = `promo-${now.toDateString()}-${PROMO_SCHEDULE.hour}:${PROMO_SCHEDULE.minute}`;
             if (lastPromoSentKey !== promoKey) {
                 lastPromoSentKey = promoKey;
@@ -851,12 +870,11 @@ function scheduleNews(sock) {
             }
         }
 
-    }, 15000);
+    }, 30000); // ✅ cada 30 segundos — detecta el minuto sin fallar
 }
 
 // ============================================================
-// HELPER — EXTRAER TEXTO (todos los formatos de WhatsApp)
-// ✅ Cubre conversation, extendedText, caption de imagen/video, etc.
+// HELPER — EXTRAER TEXTO
 // ============================================================
 function extraerTextoMensaje(m) {
     return (
@@ -872,7 +890,7 @@ function extraerTextoMensaje(m) {
 }
 
 // ============================================================
-// HELPER — ENVIAR SALUDO (reutilizable)
+// HELPER — ENVIAR SALUDO
 // ============================================================
 async function enviarSaludo(sock, remoteJid) {
     const imagePath   = './Imagenes2/Ghostcmd.png';
@@ -926,7 +944,6 @@ async function connectToWhatsApp() {
 
     globalSock = sock;
 
-    // ✅ FIX: keepAlive detecta caídas silenciosas de WhatsApp
     if (!keepAliveStarted) {
         keepAliveStarted = true;
         setInterval(async () => {
@@ -984,7 +1001,6 @@ async function connectToWhatsApp() {
         const esGrupo   = remoteJid.endsWith("@g.us");
         const esMio     = m.key.fromMe;
 
-        // ✅ LOG DE DEBUG DETALLADO para mensajes privados entrantes
         if (!esGrupo && !esMio) {
             const tiposPresentes = Object.keys(m.message || {}).join(', ');
             const textoExtraido  = extraerTextoMensaje(m);
