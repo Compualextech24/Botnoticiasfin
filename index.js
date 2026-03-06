@@ -80,17 +80,18 @@ const firstTimeUsers    = new Set();
 const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
-    { hour: 7, minute: 30 },  // ← INDICADOR DE HORA
-    { hour: 22, minute: 00 }   // ← INDICADOR DE HORA
+    { hour: 10, minute: 45 },
+    { hour: 22, minute: 00 }
 ];
 
 // ── Promo Retenes ──
 const RETENES_GROUP_ID = "120363415871374454@g.us";
-const PROMO_SCHEDULE   = { hour: 14, minute: 55 };  // ← INDICADOR DE HORA
+const PROMO_SCHEDULE   = { hour: 15, minute: 30 };
 
 let lastNewsSentKey  = null;
 let lastPromoSentKey = null; // ← variable independiente para no interferir con noticias
 let newsInProgress   = false;
+let promoInProgress  = false;
 let newsScheduled    = false;
 let keepAliveStarted = false;
 let globalSock       = null;
@@ -438,7 +439,6 @@ async function scrapearRSS(sitio, fechasValidas) {
     console.log(`Scrapeando RSS: ${sitio.nombre} → ${sitio.url}`);
     const resultado = { sitio: sitio.nombre, noticias: [], sinNoticias: false, error: null };
 
-    // Solo intentar URLs que sean feed RSS (contienen 'feed' en la URL)
     const urlsRSS = [sitio.url];
     if (sitio.urlFallback && sitio.urlFallback.includes('feed')) {
         urlsRSS.push(sitio.urlFallback);
@@ -468,7 +468,6 @@ async function scrapearRSS(sitio, fechasValidas) {
         }
     }
 
-    // ✅ Si el RSS falla y hay fallback de scraping HTML, usarlo
     if (!xmlData) {
         if (sitio.urlFallback && !sitio.urlFallback.includes('feed')) {
             console.log(`   RSS sin datos, usando fallback HTML: ${sitio.urlFallback}`);
@@ -693,12 +692,22 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
-// ENVIAR PROMO — Retenes León GTO
+// ENVIAR PROMO — Retenes León GTO (con reintentos)
 // ============================================================
 async function sendPromoMessage(sock) {
-    if (!isConnected) return;
-    try {
-        const msg =
+    if (!isConnected) {
+        console.log("Bot no conectado, omitiendo promo.");
+        return false;
+    }
+    if (promoInProgress) {
+        console.log("Promo ya en ejecución, omitiendo.");
+        return false;
+    }
+
+    promoInProgress = true;
+    const MAX_REINTENTOS = 3;
+
+    const msg =
 `💺 *RECUERDA QUE CONTAMOS CON MAS DE 12 GRUPOS EN WHATSAPP* 💺
 
 Si buscas algo distinto a ventas , como empleos, retenes , noticias etc.
@@ -708,11 +717,34 @@ Si buscas algo distinto a ventas , como empleos, retenes , noticias etc.
 𝔾𝕣𝕦𝕡𝕠𝕤 𝕕𝕖 𝕎𝕙𝕒𝕥𝕤𝔸𝕡𝕡 𝕝𝕖ó𝕟 𝔾𝕥𝕠  https://whatsapp.com/channel/0029Vb6Ml1x0gcfBHsUjPs06
 
 Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
-        await sock.sendMessage(RETENES_GROUP_ID, { text: msg });
-        console.log("✅ Mensaje promo enviado a Retenes León GTO");
-    } catch (e) {
-        console.error(`ERROR enviando promo: ${e.message}`);
+
+    for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
+        try {
+            if (!isConnected) {
+                console.log(`Promo intento ${intento}: desconectado, esperando 10s...`);
+                await sleep(10000);
+                if (!isConnected) { console.log(`Sigue desconectado, saltando intento ${intento}.`); continue; }
+            }
+
+            await globalSock.sendMessage(RETENES_GROUP_ID, { text: msg });
+            console.log(`✅ Mensaje promo enviado a Retenes León GTO (intento ${intento})`);
+            promoInProgress = false;
+            return true;
+
+        } catch (err) {
+            console.error(`ERROR enviando promo (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
+            if (intento < MAX_REINTENTOS) {
+                const espera = intento * 15000;
+                console.log(`Reintentando promo en ${espera / 1000}s...`);
+                await sleep(espera);
+            } else {
+                console.error(`Todos los reintentos de promo fallaron.`);
+            }
+        }
     }
+
+    promoInProgress = false;
+    return false;
 }
 
 // ============================================================
@@ -1012,4 +1044,3 @@ async function connectToWhatsApp() {
 console.log("Iniciando Ghost Bot...");
 console.log(`Zona horaria: ${process.env.TZ || 'America/Mexico_City'}`);
 connectToWhatsApp();
-
