@@ -62,12 +62,12 @@ http.createServer(async (req, res) => {
 
     const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
     setInterval(async () => {
-      try {
-    await axios.get(RENDER_URL, { timeout: 8000 });
-    // Auto-ping silencioso — sin log en éxito para no saturar consola
-} catch (e) {
-    console.log(`Auto-ping fallo: ${e.message}`);
-}
+        try {
+            await axios.get(RENDER_URL, { timeout: 8000 });
+            // Auto-ping silencioso — sin log en éxito para no saturar consola
+        } catch (e) {
+            console.log(`Auto-ping fallo: ${e.message}`);
+        }
     }, 10 * 60 * 1000);
 });
 
@@ -80,11 +80,16 @@ const firstTimeUsers    = new Set();
 const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
-    { hour: 10, minute: 45 },
+    { hour: 14, minute: 30 },
     { hour: 22, minute: 00 }
 ];
 
+// ── Promo Retenes ──
+const RETENES_GROUP_ID = "120363415871374454@g.us";
+const PROMO_SCHEDULE   = { hour: 15, minute: 00 };
+
 let lastNewsSentKey  = null;
+let lastPromoSentKey = null; // ← variable independiente para no interferir con noticias
 let newsInProgress   = false;
 let newsScheduled    = false;
 let keepAliveStarted = false;
@@ -688,6 +693,29 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
+// ENVIAR PROMO — Retenes León GTO
+// ============================================================
+async function sendPromoMessage(sock) {
+    if (!isConnected) return;
+    try {
+        const msg =
+`💺 *RECUERDA QUE CONTAMOS CON MAS DE 12 GRUPOS EN WHATSAPP* 💺
+
+Si buscas algo distinto a ventas , como empleos, retenes , noticias etc.
+
+✅ *SOLO ÚNETE AL CANAL* ✅
+
+𝔾𝕣𝕦𝕡𝕠𝕤 𝕕𝕖 𝕎𝕙𝕒𝕥𝕤𝔸𝕡𝕡 𝕝𝕖ó𝕟 𝔾𝕥𝕠  https://whatsapp.com/channel/0029Vb6Ml1x0gcfBHsUjPs06
+
+Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
+        await sock.sendMessage(RETENES_GROUP_ID, { text: msg });
+        console.log("✅ Mensaje promo enviado a Retenes León GTO");
+    } catch (e) {
+        console.error(`ERROR enviando promo: ${e.message}`);
+    }
+}
+
+// ============================================================
 // ENVIAR NOTICIAS — CON REINTENTOS
 // ============================================================
 async function sendDailyNews(sock, isManual = false) {
@@ -744,7 +772,7 @@ async function sendDailyNews(sock, isManual = false) {
 }
 
 // ============================================================
-// SCHEDULER — PROGRAMAR NOTICIAS
+// SCHEDULER — PROGRAMAR NOTICIAS + PROMO
 // ✅ Usa globalSock siempre para evitar socket fantasma
 // ============================================================
 function scheduleNews(sock) {
@@ -755,6 +783,7 @@ function scheduleNews(sock) {
     NEWS_SCHEDULE.forEach(s =>
         console.log(`   ${String(s.hour).padStart(2,'0')}:${String(s.minute).padStart(2,'0')}`)
     );
+    console.log(`   Promo Retenes: ${String(PROMO_SCHEDULE.hour).padStart(2,'0')}:${String(PROMO_SCHEDULE.minute).padStart(2,'0')}`);
 
     setInterval(() => {
         if (!isConnected) return;
@@ -763,18 +792,33 @@ function scheduleNews(sock) {
         const h   = now.getHours();
         const min = now.getMinutes();
 
+        // ── Noticias ──
         const slot = NEWS_SCHEDULE.find(s =>
             s.hour === h && (s.minute === min || s.minute === min - 1)
         );
 
-        if (!slot) return;
-
-        const timeKey = `${now.toDateString()}-${h}:${slot.minute}`;
-        if (lastNewsSentKey !== timeKey) {
-            lastNewsSentKey = timeKey;
-            console.log(`⏰ Disparando noticias — ${h}:${String(min).padStart(2,'0')}`);
-            sendDailyNews(globalSock);
+        if (slot) {
+            const timeKey = `${now.toDateString()}-${h}:${slot.minute}`;
+            if (lastNewsSentKey !== timeKey) {
+                lastNewsSentKey = timeKey;
+                console.log(`⏰ Disparando noticias — ${h}:${String(min).padStart(2,'0')}`);
+                sendDailyNews(globalSock);
+            }
         }
+
+        // ── Promo Retenes ──
+        if (
+            h === PROMO_SCHEDULE.hour &&
+            (min === PROMO_SCHEDULE.minute || min === PROMO_SCHEDULE.minute + 1)
+        ) {
+            const promoKey = `promo-${now.toDateString()}-${PROMO_SCHEDULE.hour}:${PROMO_SCHEDULE.minute}`;
+            if (lastPromoSentKey !== promoKey) {
+                lastPromoSentKey = promoKey;
+                console.log(`⏰ Disparando promo Retenes — ${h}:${String(min).padStart(2,'0')}`);
+                sendPromoMessage(globalSock);
+            }
+        }
+
     }, 15000);
 }
 
@@ -968,6 +1012,3 @@ async function connectToWhatsApp() {
 console.log("Iniciando Ghost Bot...");
 console.log(`Zona horaria: ${process.env.TZ || 'America/Mexico_City'}`);
 connectToWhatsApp();
-
-
-
