@@ -1019,15 +1019,30 @@ async function connectToWhatsApp() {
             console.log("QR listo — visita /qr");
         }
 
-        if (connection === "open") {
-            // ✅ FIX: Marcar timestamp de conexión para detectar socket fresco
-            isConnected    = true;
+        
+       if (connection === "open") {
+            isConnected     = true;
             lastConnectedAt = Date.now();
-            latestQr       = null;
+            latestQr        = null;
             console.log("✅ BOT CONECTADO Y OPERATIVO");
             scheduleNews();
-        }
 
+            // ✅ LISTAR GRUPOS Y CANALES AL CONECTAR
+            setTimeout(async () => {
+                try {
+                    const chats = await sock.groupFetchAllParticipating();
+                    console.log("======= GRUPOS Y CANALES DEL BOT =======");
+                    for (const [jid, info] of Object.entries(chats)) {
+                        const tipo = jid.endsWith("@newsletter") ? "📢 CANAL" : "👥 GRUPO";
+                        console.log(`${tipo} | ${info.subject || 'Sin nombre'} | JID: ${jid}`);
+                    }
+                    console.log("=========================================");
+                } catch (e) {
+                    console.log(`Error listando chats: ${e.message}`);
+                }
+            }, 8000);
+        }
+        
         if (connection === "close") {
             isConnected = false;
             const code = lastDisconnect?.error?.output?.statusCode;
