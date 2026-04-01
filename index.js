@@ -79,7 +79,7 @@ const firstTimeUsers    = new Set();
 const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
-    { hour: 18, minute: 05 },
+    { hour: 23, minute: 45 },
     { hour: 23, minute: 55 }
 ];
 
@@ -1019,42 +1019,15 @@ async function connectToWhatsApp() {
             console.log("QR listo — visita /qr");
         }
 
-        
-       if (connection === "open") {
-            isConnected     = true;
+        if (connection === "open") {
+            // ✅ FIX: Marcar timestamp de conexión para detectar socket fresco
+            isConnected    = true;
             lastConnectedAt = Date.now();
-            latestQr        = null;
+            latestQr       = null;
             console.log("✅ BOT CONECTADO Y OPERATIVO");
             scheduleNews();
+        }
 
-           // ✅ LISTAR GRUPOS Y CANALES AL CONECTAR
-            setTimeout(async () => {
-                try {
-                    // Grupos
-                    const chats = await sock.groupFetchAllParticipating();
-                    console.log("======= GRUPOS DEL BOT =======");
-                    for (const [jid, info] of Object.entries(chats)) {
-                        console.log(`👥 GRUPO | ${info.subject || 'Sin nombre'} | JID: ${jid}`);
-                    }
-                    console.log("==============================");
-                } catch (e) {
-                    console.log(`Error listando grupos: ${e.message}`);
-                }
-
-                try {
-                    // Canales (newsletters)
-                    const canales = await sock.newsletterSubscribed();
-                    console.log("======= CANALES DEL BOT =======");
-                    for (const c of canales) {
-                        console.log(`📢 CANAL | ${c.name || c.id} | JID: ${c.id}`);
-                    }
-                    console.log("===============================");
-                } catch (e) {
-                    console.log(`Error listando canales: ${e.message}`);
-                }
-
-            }, 8000);
-           
         if (connection === "close") {
             isConnected = false;
             const code = lastDisconnect?.error?.output?.statusCode;
@@ -1071,24 +1044,19 @@ async function connectToWhatsApp() {
     });
 
     sock.ev.on("creds.update", saveCreds);
-
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-
-        // ✅ CANALES: capturar ANTES del filtro de type
-        for (const msg of messages) {
-            const jid = msg?.key?.remoteJid || '';
-            if (jid.endsWith("@newsletter")) {
-                console.log(`📢 CANAL DETECTADO — JID: ${jid}`);
-            }
-        }
-
+ sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (type !== "notify") return;
         const m = messages[0];
         if (!m?.message) return;
 
         const remoteJid = m.key.remoteJid;
-        const esCanal   = remoteJid.endsWith("@newsletter");
-        if (esCanal) return;
+
+        // ✅ BLOQUEAR Y LOGGEAR CANALES DE WHATSAPP (@newsletter)
+        const esCanal = remoteJid.endsWith("@newsletter");
+        if (esCanal) {
+            console.log(`📢 CANAL DETECTADO — JID: ${remoteJid}`);
+            return;
+        }
 
         const esGrupo = remoteJid.endsWith("@g.us");
         const esMio   = m.key.fromMe;
@@ -1136,6 +1104,7 @@ async function connectToWhatsApp() {
         }
     });
 }
+
 // ============================================================
 // ARRANQUE
 // ============================================================
