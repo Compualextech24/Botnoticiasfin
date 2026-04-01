@@ -1045,19 +1045,23 @@ async function connectToWhatsApp() {
 
     sock.ev.on("creds.update", saveCreds);
 
-     sock.ev.on("messages.upsert", async ({ messages, type }) => {
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+
+        // ✅ CANALES: capturar ANTES del filtro de type
+        for (const msg of messages) {
+            const jid = msg?.key?.remoteJid || '';
+            if (jid.endsWith("@newsletter")) {
+                console.log(`📢 CANAL DETECTADO — JID: ${jid}`);
+            }
+        }
+
         if (type !== "notify") return;
         const m = messages[0];
         if (!m?.message) return;
 
         const remoteJid = m.key.remoteJid;
-
-        // ✅ BLOQUEAR Y LOGGEAR CANALES DE WHATSAPP (@newsletter)
-        const esCanal = remoteJid.endsWith("@newsletter");
-        if (esCanal) {
-            console.log(`📢 CANAL DETECTADO — JID: ${remoteJid}`);
-            return;
-        }
+        const esCanal   = remoteJid.endsWith("@newsletter");
+        if (esCanal) return;
 
         const esGrupo = remoteJid.endsWith("@g.us");
         const esMio   = m.key.fromMe;
@@ -1105,7 +1109,6 @@ async function connectToWhatsApp() {
         }
     });
 }
-
 // ============================================================
 // ARRANQUE
 // ============================================================
