@@ -1027,22 +1027,34 @@ async function connectToWhatsApp() {
             console.log("✅ BOT CONECTADO Y OPERATIVO");
             scheduleNews();
 
-            // ✅ LISTAR GRUPOS Y CANALES AL CONECTAR
+           // ✅ LISTAR GRUPOS Y CANALES AL CONECTAR
             setTimeout(async () => {
                 try {
+                    // Grupos
                     const chats = await sock.groupFetchAllParticipating();
-                    console.log("======= GRUPOS Y CANALES DEL BOT =======");
+                    console.log("======= GRUPOS DEL BOT =======");
                     for (const [jid, info] of Object.entries(chats)) {
-                        const tipo = jid.endsWith("@newsletter") ? "📢 CANAL" : "👥 GRUPO";
-                        console.log(`${tipo} | ${info.subject || 'Sin nombre'} | JID: ${jid}`);
+                        console.log(`👥 GRUPO | ${info.subject || 'Sin nombre'} | JID: ${jid}`);
                     }
-                    console.log("=========================================");
+                    console.log("==============================");
                 } catch (e) {
-                    console.log(`Error listando chats: ${e.message}`);
+                    console.log(`Error listando grupos: ${e.message}`);
                 }
+
+                try {
+                    // Canales (newsletters)
+                    const canales = await sock.newsletterSubscribed();
+                    console.log("======= CANALES DEL BOT =======");
+                    for (const c of canales) {
+                        console.log(`📢 CANAL | ${c.name || c.id} | JID: ${c.id}`);
+                    }
+                    console.log("===============================");
+                } catch (e) {
+                    console.log(`Error listando canales: ${e.message}`);
+                }
+
             }, 8000);
-        }
-        
+           
         if (connection === "close") {
             isConnected = false;
             const code = lastDisconnect?.error?.output?.statusCode;
