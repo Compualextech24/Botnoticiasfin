@@ -79,7 +79,7 @@ const firstTimeUsers    = new Set();
 const MAX_CACHE_SIZE = 500;
 const NEWS_GROUP_ID  = "120363371012169967@g.us";
 const NEWS_SCHEDULE  = [
-    { hour: 23, minute: 45 },
+    { hour: 14, minute: 10 },
     { hour: 23, minute: 55 }
 ];
 
