@@ -6,6 +6,7 @@ const baileys = require("@whiskeysockets/baileys");
 const makeWASocket = baileys.default;
 const useMultiFileAuthState = baileys.useMultiFileAuthState;
 const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
+const DisconnectReason = baileys.DisconnectReason;
 const fs = require('fs');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -53,6 +54,13 @@ http.createServer(async (req, res) => {
             <h2>Escanea el QR</h2><img src="${img}"/>
             <script>setTimeout(() => location.reload(), 20000);</script>
         </body></html>`);
+    } else if (req.url === "/status") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+            connected: isConnected,
+            reconnectCount,
+            uptime: Math.floor(process.uptime()) + 's'
+        }));
     } else {
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("Bot Online");
@@ -94,13 +102,93 @@ let newsScheduled    = false;
 let keepAliveStarted = false;
 let globalSock       = null;
 let isConnected      = false;
+let lastConnectedAt  = 0;
 
 // ============================================================
-// ✅ FIX PRINCIPAL: Timestamp del último "open" confirmado
-//    Se usa para detectar si el socket es REALMENTE nuevo
+// ✅ REFUERZO: Control de reconexiones con backoff exponencial
 // ============================================================
-let lastConnectedAt = 0;
+let reconnectCount      = 0;
+const MAX_RECONNECTS    = 10;   // Máximo de intentos antes de reiniciar auth
+const BASE_RECONNECT_MS = 5000; // 5s base, se duplica cada intento
+let reconnectTimer      = null;
+let isReconnecting      = false;
 
+// Watchdog: si en 5 minutos no logra conectar, fuerza reinicio de auth
+let watchdogTimer = null;
+function resetWatchdog() {
+    if (watchdogTimer) clearTimeout(watchdogTimer);
+    watchdogTimer = setTimeout(() => {
+        if (!isConnected) {
+            console.log("🐕 WATCHDOG: 5 min sin conexión — forzando reinicio limpio de auth...");
+            limpiarAuthYReconectar();
+        }
+    }, 5 * 60 * 1000);
+}
+
+// ============================================================
+// ✅ REFUERZO: Función para borrar auth y reconectar desde cero
+// ============================================================
+function limpiarAuthYReconectar() {
+    console.log("🗑️  Borrando auth_info para forzar nuevo QR...");
+    try {
+        if (fs.existsSync('./auth_info')) {
+            fs.rmSync('./auth_info', { recursive: true, force: true });
+            console.log("✅ auth_info eliminado. Se generará nuevo QR.");
+        }
+    } catch (e) {
+        console.error(`Error borrando auth_info: ${e.message}`);
+    }
+    reconnectCount = 0;
+    isReconnecting = false;
+    setTimeout(connectToWhatsApp, 3000);
+}
+
+// ============================================================
+// ✅ REFUERZO: Reconexión con backoff exponencial
+// ============================================================
+function programarReconexion(borrarAuth = false) {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (isReconnecting) return;
+
+    if (borrarAuth) {
+        console.log("🔄 Reconexión con limpieza de auth programada...");
+        limpiarAuthYReconectar();
+        return;
+    }
+
+    reconnectCount++;
+    if (reconnectCount > MAX_RECONNECTS) {
+        console.log(`⚠️  ${reconnectCount} reconexiones fallidas — limpiando auth y empezando de cero...`);
+        limpiarAuthYReconectar();
+        return;
+    }
+
+    // Backoff exponencial: 5s, 10s, 20s, 40s ... máximo 60s
+    const delay = Math.min(BASE_RECONNECT_MS * Math.pow(2, reconnectCount - 1), 60000);
+    console.log(`🔄 Reconexión #${reconnectCount}/${MAX_RECONNECTS} en ${delay/1000}s...`);
+
+    isReconnecting = true;
+    reconnectTimer = setTimeout(() => {
+        isReconnecting = false;
+        connectToWhatsApp();
+    }, delay);
+
+    resetWatchdog();
+}
+
+// ============================================================
+// RESETEAR contador de reconexiones al conectar exitosamente
+// ============================================================
+function onConexionExitosa() {
+    reconnectCount = 0;
+    isReconnecting = false;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (watchdogTimer)  { clearTimeout(watchdogTimer);  watchdogTimer  = null; }
+}
+
+// ============================================================
+// Guardias anti-cuelgue
+// ============================================================
 setInterval(() => {
     if (promoInProgress) { console.log("⚠️ promoInProgress colgado — reseteando."); promoInProgress = false; }
     if (newsInProgress)  { console.log("⚠️ newsInProgress colgado — reseteando.");  newsInProgress  = false; }
@@ -130,22 +218,17 @@ function horaEnMexico() {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ============================================================
-// ✅ FIX PRINCIPAL: esperarConexion MEJORADO
-//    - Espera a que isConnected sea true
-//    - Además espera 5s EXTRA para que el socket se estabilice
-//      antes de intentar enviar (evita EPIPE en socket recién abierto)
+// esperarConexion — espera a que isConnected sea true
 // ============================================================
 async function esperarConexion(label = '') {
     if (isConnected) {
-        // Si ya está conectado, igual esperamos 1s para asegurarnos
-        // que el socket interno de Baileys esté listo
         await sleep(1000);
         return true;
     }
 
     console.log(`${label} Esperando reconexión...`);
     let espera = 0;
-    const MAX_ESPERA = 90000; // 90 segundos máximo
+    const MAX_ESPERA = 90000;
 
     while (!isConnected && espera < MAX_ESPERA) {
         await sleep(2000);
@@ -157,22 +240,12 @@ async function esperarConexion(label = '') {
         return false;
     }
 
-    // ✅ CRÍTICO: Pausa de 6 segundos después de reconectar
-    // El evento "open" dispara ANTES de que el socket WA esté
-    // listo para enviar. Sin esta pausa ocurre el EPIPE.
-    console.log(`${label} Conexión detectada, esperando estabilización del socket (6s)...`);
+    console.log(`${label} Conexión detectada, esperando estabilización (6s)...`);
     await sleep(6000);
-
     return true;
 }
 
-// ============================================================
-// ✅ FIX PRINCIPAL: getSock() — siempre usa el socket más reciente
-//    y verifica que no esté cerrado antes de usarlo
-// ============================================================
-function getSock() {
-    return globalSock;
-}
+function getSock() { return globalSock; }
 
 // ============================================================
 // SCRAPER — CONFIGURACIÓN
@@ -753,10 +826,7 @@ function formatearParaWhatsApp(resultados, fechasValidas) {
 }
 
 // ============================================================
-// ✅ FIX PRINCIPAL: ENVIAR PROMO
-//    - Espera conexión estable ANTES de intentar enviar
-//    - Usa getSock() para tener siempre el socket más reciente
-//    - Pausa extra entre reintentos para evitar EPIPE
+// ENVIAR PROMO
 // ============================================================
 async function sendPromoMessage() {
     if (promoInProgress) { console.log("Promo ya en ejecución, omitiendo."); return false; }
@@ -777,7 +847,6 @@ Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
 
     try {
         for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
-            // ✅ SIEMPRE esperar conexión estable antes de cada intento
             const listo = await esperarConexion(`[Promo intento ${intento}/${MAX_REINTENTOS}]`);
             if (!listo) {
                 console.log(`[Promo intento ${intento}] Sin conexión, pasando al siguiente intento...`);
@@ -799,16 +868,12 @@ Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
                 console.error(`ERROR promo (intento ${intento}/${MAX_REINTENTOS}): ${err.message}`);
 
                 if (err.message && (err.message.includes('EPIPE') || err.message.includes('ECONNRESET') || err.message.includes('socket'))) {
-                    // Socket roto: marcar desconectado y esperar reconexión en siguiente vuelta
                     isConnected = false;
                     console.log(`[Promo intento ${intento}] Socket roto detectado, esperando reconexión...`);
                 }
 
-                if (intento < MAX_REINTENTOS) {
-                    await sleep(8000); // Pausa entre reintentos
-                } else {
-                    console.error(`Todos los reintentos de promo fallaron.`);
-                }
+                if (intento < MAX_REINTENTOS) await sleep(8000);
+                else console.error(`Todos los reintentos de promo fallaron.`);
             }
         }
         return false;
@@ -818,8 +883,7 @@ Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
 }
 
 // ============================================================
-// ✅ FIX PRINCIPAL: ENVIAR NOTICIAS
-//    Misma lógica de espera que sendPromoMessage
+// ENVIAR NOTICIAS
 // ============================================================
 async function sendDailyNews(isManual = false) {
     if (newsInProgress) { console.log("Scraper ya en ejecución, omitiendo."); return false; }
@@ -831,7 +895,6 @@ async function sendDailyNews(isManual = false) {
     try {
         const MAX_REINTENTOS = 3;
         for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
-            // ✅ SIEMPRE esperar conexión estable antes de cada intento
             const listo = await esperarConexion(`[Noticias intento ${intento}/${MAX_REINTENTOS}]`);
             if (!listo) {
                 console.log(`[Noticias intento ${intento}] Sin conexión, pasando al siguiente intento...`);
@@ -865,11 +928,8 @@ async function sendDailyNews(isManual = false) {
                     console.log(`[Noticias intento ${intento}] Socket roto detectado, esperando reconexión...`);
                 }
 
-                if (intento < MAX_REINTENTOS) {
-                    await sleep(8000);
-                } else {
-                    console.error(`Todos los reintentos fallaron.`);
-                }
+                if (intento < MAX_REINTENTOS) await sleep(8000);
+                else console.error(`Todos los reintentos fallaron.`);
             }
         }
         return false;
@@ -896,7 +956,6 @@ function scheduleNews() {
 
         const { h, min, dateStr } = horaEnMexico();
 
-        // ── Noticias ──
         const slot = NEWS_SCHEDULE.find(s =>
             s.hour === h && (min === s.minute || min === s.minute + 1)
         );
@@ -909,7 +968,6 @@ function scheduleNews() {
             }
         }
 
-        // ── Promo Retenes ──
         if (h === PROMO_SCHEDULE.hour &&
             (min === PROMO_SCHEDULE.minute || min === PROMO_SCHEDULE.minute + 1)) {
             const key = `promo-${dateStr}-${PROMO_SCHEDULE.hour}:${PROMO_SCHEDULE.minute}`;
@@ -971,8 +1029,28 @@ async function enviarSaludo(sock, remoteJid) {
 // CONEXIÓN PRINCIPAL
 // ============================================================
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState("auth_info");
-    const { version }          = await fetchLatestBaileysVersion();
+    // Evitar instancias paralelas
+    if (isReconnecting) {
+        console.log("⚠️ Ya hay una reconexión en curso, ignorando llamada duplicada.");
+        return;
+    }
+
+    let state, saveCreds;
+    try {
+        ({ state, saveCreds } = await useMultiFileAuthState("auth_info"));
+    } catch (e) {
+        console.error(`Error cargando auth_info: ${e.message} — reintentando en 5s`);
+        setTimeout(connectToWhatsApp, 5000);
+        return;
+    }
+
+    let version;
+    try {
+        ({ version } = await fetchLatestBaileysVersion());
+    } catch (e) {
+        console.log(`No se pudo obtener versión de Baileys: ${e.message} — usando versión por defecto`);
+        version = [2, 3000, 1015901307];
+    }
 
     const sock = makeWASocket({
         version, auth: state,
@@ -992,7 +1070,6 @@ async function connectToWhatsApp() {
         retryRequestDelayMs:   250
     });
 
-    // ✅ FIX: Actualizar globalSock INMEDIATAMENTE al crear socket nuevo
     globalSock = sock;
 
     if (!keepAliveStarted) {
@@ -1016,42 +1093,83 @@ async function connectToWhatsApp() {
             latestQr    = qr;
             isConnected = false;
             qrcodeTerminal.generate(qr, { small: true });
-            console.log("QR listo — visita /qr");
+            console.log("📱 QR listo — visita /qr para escanear");
         }
 
         if (connection === "open") {
-            // ✅ FIX: Marcar timestamp de conexión para detectar socket fresco
-            isConnected    = true;
+            isConnected     = true;
             lastConnectedAt = Date.now();
-            latestQr       = null;
+            latestQr        = null;
             console.log("✅ BOT CONECTADO Y OPERATIVO");
+            onConexionExitosa(); // ✅ Resetear contadores de reconexión
             scheduleNews();
         }
 
         if (connection === "close") {
             isConnected = false;
-            const code = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = code !== 401 && code !== 440 && code !== 428;
+            const err  = lastDisconnect?.error;
+            const code = err?.output?.statusCode ?? err?.output?.payload?.statusCode ?? null;
 
-            console.log(`Conexión cerrada (código: ${code ?? 'desconocido'}) — ${shouldReconnect ? 'reconectando en 5s' : 'STOP definitivo'}`);
+            console.log(`⚠️ Conexión cerrada — código: ${code ?? 'desconocido'}`);
 
-            if (shouldReconnect) {
-                setTimeout(connectToWhatsApp, 5000);
-            } else {
-                console.log("Bot detenido. Sube auth_info a GitHub y redespliega si fue accidental.");
+            // ================================================================
+            // ✅ TABLA DE DECISIÓN DE RECONEXIÓN
+            //
+            //  401 → Sesión revocada por WA (ban o logout manual) → STOP
+            //  440 → Sesión abierta en otro dispositivo           → Borrar auth + nuevo QR
+            //  428 → Stream timeout / keepalive perdido           → Reconexión normal
+            //  515 → Restart requerido por WA                     → Reconexión normal
+            //  503 → Servidor WA no disponible                    → Reconexión con backoff
+            //  500 → Error interno WA                             → Reconexión con backoff
+            //  null / undefined → Caída de red o desconocido      → Reconexión con backoff
+            //  Cualquier otro  → Reconexión con backoff
+            // ================================================================
+
+            if (code === 401) {
+                // Sesión revocada permanentemente por WhatsApp — no tiene sentido reconectar
+                console.log("🚫 STOP DEFINITIVO: Sesión revocada (401). El número fue desconectado manualmente desde el teléfono o baneado.");
+                console.log("   → Sube auth_info a GitHub o bórralo y redespliega para generar nuevo QR.");
+                return; // No reconectar
             }
+
+            if (code === 440) {
+                // Sesión expulsada porque el mismo número se abrió en otro dispositivo/web
+                // → Borrar auth y generar nuevo QR automáticamente
+                console.log("📵 Código 440: sesión desplazada por otro dispositivo.");
+                console.log("   → Borrando auth_info y generando nuevo QR automáticamente...");
+                limpiarAuthYReconectar();
+                return;
+            }
+
+            if (code === 428) {
+                // Stream timeout — pérdida de keepalive, reconexión rápida
+                console.log("⏱️ Código 428: stream timeout — reconectando en 3s...");
+                setTimeout(connectToWhatsApp, 3000);
+                return;
+            }
+
+            if (code === 515) {
+                // WA pide restart explícito
+                console.log("🔁 Código 515: WA solicitó reinicio — reconectando en 3s...");
+                setTimeout(connectToWhatsApp, 3000);
+                return;
+            }
+
+            // Para cualquier otro código (503, 500, red caída, etc.) → backoff exponencial
+            console.log(`🔄 Reconectando con backoff (código: ${code ?? 'desconocido'})...`);
+            programarReconexion(false);
         }
     });
 
     sock.ev.on("creds.update", saveCreds);
- sock.ev.on("messages.upsert", async ({ messages, type }) => {
+
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (type !== "notify") return;
         const m = messages[0];
         if (!m?.message) return;
 
         const remoteJid = m.key.remoteJid;
 
-        // ✅ BLOQUEAR Y LOGGEAR CANALES DE WHATSAPP (@newsletter)
         const esCanal = remoteJid.endsWith("@newsletter");
         if (esCanal) {
             console.log(`📢 CANAL DETECTADO — JID: ${remoteJid}`);
