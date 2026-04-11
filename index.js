@@ -105,6 +105,45 @@ let isConnected      = false;
 let lastConnectedAt  = 0;
 
 // ============================================================
+// ✅ COLA DE PENDIENTES — si cae durante envío, reintenta al reconectar
+// ============================================================
+const pendingQueue = []; // { type: 'promo'|'news', isManual: bool, addedAt: number }
+
+function encolarPendiente(type, isManual = false) {
+    // No encolar duplicados del mismo tipo
+    if (pendingQueue.find(p => p.type === type)) {
+        console.log(`📋 Ya hay un ${type} pendiente en cola, no se duplica.`);
+        return;
+    }
+    console.log(`📋 Encolando ${type} para reenvío al reconectar...`);
+    pendingQueue.push({ type, isManual, addedAt: Date.now() });
+}
+
+async function procesarCola() {
+    if (pendingQueue.length === 0) return;
+    if (!isConnected) return;
+
+    // Esperar estabilización antes de procesar
+    await sleep(8000);
+    if (!isConnected) return;
+
+    console.log(`📋 Procesando cola de pendientes (${pendingQueue.length} item(s))...`);
+
+    while (pendingQueue.length > 0) {
+        const item = pendingQueue.shift();
+        // Descartar si lleva más de 30 minutos esperando
+        if (Date.now() - item.addedAt > 30 * 60 * 1000) {
+            console.log(`📋 ${item.type} descartado de cola (expiró 30min).`);
+            continue;
+        }
+        console.log(`📋 Reintentando envío de ${item.type} desde cola...`);
+        if (item.type === 'promo') await sendPromoMessage();
+        if (item.type === 'news')  await sendDailyNews(item.isManual);
+        await sleep(3000);
+    }
+}
+
+// ============================================================
 // ✅ REFUERZO: Control de reconexiones con backoff exponencial
 // ============================================================
 let reconnectCount      = 0;
@@ -873,7 +912,10 @@ Atte: 🅰🅳🅼🅸🅽🅸🆂🆃🆁🅰🅲🅸🅾🅽`;
                 }
 
                 if (intento < MAX_REINTENTOS) await sleep(8000);
-                else console.error(`Todos los reintentos de promo fallaron.`);
+                else {
+                    console.error(`Todos los reintentos de promo fallaron.`);
+                    encolarPendiente('promo');
+                }
             }
         }
         return false;
@@ -929,7 +971,10 @@ async function sendDailyNews(isManual = false) {
                 }
 
                 if (intento < MAX_REINTENTOS) await sleep(8000);
-                else console.error(`Todos los reintentos fallaron.`);
+                else {
+                    console.error(`Todos los reintentos fallaron.`);
+                    encolarPendiente('news', isManual);
+                }
             }
         }
         return false;
@@ -1101,8 +1146,10 @@ async function connectToWhatsApp() {
             lastConnectedAt = Date.now();
             latestQr        = null;
             console.log("✅ BOT CONECTADO Y OPERATIVO");
-            onConexionExitosa(); // ✅ Resetear contadores de reconexión
+            onConexionExitosa();
             scheduleNews();
+            // ✅ Si había envíos pendientes (caídos por 408/EPIPE), procesarlos ahora
+            procesarCola();
         }
 
         if (connection === "close") {
@@ -1144,6 +1191,13 @@ async function connectToWhatsApp() {
             if (code === 428) {
                 // Stream timeout — pérdida de keepalive, reconexión rápida
                 console.log("⏱️ Código 428: stream timeout — reconectando en 3s...");
+                setTimeout(connectToWhatsApp, 3000);
+                return;
+            }
+
+            if (code === 408) {
+                // Request timeout — WA cortó la conexión, reconexión rápida
+                console.log("⏱️ Código 408: request timeout — reconectando en 3s...");
                 setTimeout(connectToWhatsApp, 3000);
                 return;
             }
